@@ -1,40 +1,78 @@
-# JITA
+# Trace-Based JIT Compiler
 
-**Just-In-Time Allocator with Polyhedral Optimization**
+A speculative, adaptive compiler that watches bytecode execution, identifies hot paths, compiles them to x64 machine code, and falls back to interpretation when assumptions fail.
 
-## The Question
+## What This Is
 
-GPU memory allocation (`cudaMalloc`/`cudaFree`) takes 10-100μs per call. Deep learning training makes thousands of these calls per iteration. Does this overhead actually matter? Can we eliminate it?
+You're implementing the core technology behind PyPy and LuaJIT. The system observes program behavior at runtime, records linear execution traces of hot loops, compiles those traces to native code with guard conditions, and deoptimizes back to the interpreter when speculation fails.
 
-## The Approach
+This is low-level, research-grade systems work. You'll implement runtime code generation, handle speculation vs. correctness, and work directly at the code-to-machine boundary.
 
-Treat allocation as a compilation problem:
+## Architecture
 
-1. **Profile**: Capture allocation patterns during initial training iterations
-2. **Detect**: Statistical analysis to find repeating allocation sequences  
-3. **Optimize**: Pre-allocate memory arenas based on learned patterns
-4. **Verify**: Apply polyhedral dependence analysis to prove reuse is safe
+```
+Run in interpreter → detect hot loop → record trace → compile to x64 with guards
+                                                              |
+                                                              v
+                                        guard fails? → fallback to interpreter
+```
 
-## Technical Stack
+**Core components:**
+- **Scout/Interpreter:** Executes bytecode, observes runtime behavior, serves as fallback
+- **Trace Recorder:** Captures linear instruction sequences for hot paths with runtime assumptions
+- **Trace Compiler:** Converts recorded traces to x64 machine code with guard insertion
+- **Guard & Deopt:** Falls back to interpreter when assumptions violated, optionally records new trace
+- **Trace Chaining:** (Future) Direct linking of compiled traces for maximum performance
 
-- **Profiling**: PyTorch memory subsystem hooks, NVTX, Nsight Systems
-- **Analysis**: Pattern detection, statistical confidence metrics
-- **Optimization**: Pool-based allocation, pointer arithmetic
-- **Formal methods**: ISL (Integer Set Library), polyhedral modeling
+## 10-Day Roadmap
 
-## Goals
+**Days 1-3: Tiny Bytecode VM**
+- Stack-based VM with ~8 opcodes (LOAD_CONST, ADD, SUB, MUL, JUMP, JUMP_IF_ZERO, PRINT, HALT)
+- Simple fetch-decode-execute loop
+- Test: compute `sum = 0; for(i=0; i<100; i++) sum += i;`
 
-- Measure allocation overhead in real ML workloads (15-30%?)
-- Characterize allocation patterns (affine vs non-affine)
-- Build working JIT allocator (target: 1.2-1.4× speedup)
-- Explore polyhedral optimization for memory management
+**Days 4-6: Hot Path Detection**
+- Backward jump counters at loop headers
+- Trace recording infrastructure when threshold hit
+- Milestone: print "HOT LOOP DETECTED" and log executed opcodes
 
-## Non-Goals
+**Days 7-10: Trace to x64**
+- mmap executable memory buffer
+- Generate machine code for ADD opcode
+- Milestone: execute compiled trace, even if hardcoded
 
-- Production-ready allocator (research prototype)
-- Replacing PyTorch's caching allocator (understanding it)
-- General-purpose memory allocation (ML-specific)
+**After Day 10:**
+- Guard insertion for type/value assumptions
+- Deoptimization back to interpreter
+- Full opcode coverage
+- Register allocation (linear scan)
+- Trace chaining
+
+## Why This Matters
+
+This isn't another compiler project. You're building adaptive optimization infrastructure that:
+- Speculatively compiles based on observed behavior
+- Maintains correctness through runtime guards
+- Handles both fast path (compiled) and slow path (interpreted)
+- Can extend into research territory (adaptive trace selection, novel guard optimization, trace merging)
+
+The techniques here are used in production VMs handling billions of requests daily.
+
+## Tech Stack
+
+- C/C++ for VM and codegen
+- x64 assembly for machine code emission
+- mmap for executable memory management
+- Zero dependencies for core implementation
+
+## Getting Started
+
+Write the interpreter first. Get something running. Everything else builds on that foundation.
+
+The dopamine hit of watching your generated machine code execute will carry you through the rest.
 
 ---
 
-*Research project exploring the intersection of memory allocation, JIT compilation, and polyhedral optimization.*
+**Status:** In development  
+**Timeline:** Incremental progress, chip away approach  
+**Goal:** Working trace compilation with guards and deopt
