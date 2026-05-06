@@ -1,0 +1,11 @@
+function(add_unit_test name src)
+  add_executable(${name} ${src})
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(${name} PRIVATE tbjit_obj)
+  target_compile_options(${name} PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_unit_test(test_alloc   test_alloc.cpp)
+add_unit_test(test_dispatch test_dispatch.cpp)
+add_unit_test(test_ring    test_ring.cpp)

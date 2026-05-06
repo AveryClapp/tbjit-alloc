@@ -9,6 +9,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 if(NOT UNIX OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
   message(FATAL_ERROR "tbjit-alloc requires Linux x86-64")
 endif()
@@ -16,6 +18,7 @@ endif()
 set(TBJIT_SOURCES
   src/alloc/alloc.cpp
   src/trace/trace.cpp
+  src/trace/trampoline.cpp
   src/analysis/analysis.cpp
   src/codegen/codegen.cpp
   src/dispatch/dispatch.cpp
