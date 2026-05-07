@@ -36,8 +36,7 @@ void handle(CallSiteID id, void* code_page) {
     uint64_t e = g_epoch.fetch_add(1, std::memory_order_acq_rel);
     if (g_pending_count < MAX_PENDING)
         g_pending[g_pending_count++] = {code_page, e};
-    // Restart analysis from scratch for this call site
-    (void)analysis::submit; // will be wired in properly
+    // Restart analysis from scratch for this call site (Task 6: wire up process_event)
 }
 
 void mark_safe_point() {

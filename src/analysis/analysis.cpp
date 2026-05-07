@@ -1,56 +1,121 @@
-#include "analysis.h"
+#include "analysis/analysis.h"
+#include "analysis/ks_test.h"
 #include "alloc/alloc.h"
-#include <atomic>
-#include <cstdint>
+#include <new>
+#include <sys/mman.h>
 
-// Per-call-site summary. Tracks size distribution and event count.
-// Specialization triggers after SPECIALIZE_THRESHOLD stable events.
 namespace tbjit::analysis {
 
 namespace {
 
-constexpr uint32_t SPECIALIZE_THRESHOLD = 10'000;
-constexpr uint32_t STABILITY_WINDOW     = 1'000;
-constexpr size_t   MAX_CALL_SITES       = 4096;
+constexpr size_t   MAX_CALL_SITES        = 4096;
+constexpr uint32_t STABLE_WINDOWS_NEEDED = 10;
+constexpr double   KS_ALPHA              = 0.05;
 
-struct CallSiteSummary {
-    CallSiteID  id;
-    uint64_t    event_count;
-    uint64_t    stable_count;
-    Strategy    current_strategy;
-    // TODO: DDSketch for size distribution, KS test state
-};
-
-CallSiteSummary* g_summaries = nullptr;
+CallSiteSummary* g_summaries     = nullptr;
 size_t           g_summary_count = 0;
 
 CallSiteSummary* find_or_create(CallSiteID id) {
-    for (size_t i = 0; i < g_summary_count; ++i) {
+    for (size_t i = 0; i < g_summary_count; ++i)
         if (g_summaries[i].id == id) return &g_summaries[i];
-    }
     if (g_summary_count >= MAX_CALL_SITES) return nullptr;
-    auto& s = g_summaries[g_summary_count++];
-    s = {id, 0, 0, Strategy::Generic};
-    return &s;
+    CallSiteSummary* s = &g_summaries[g_summary_count++];
+    new (s) CallSiteSummary{};
+    s->id = id;
+    return s;
+}
+
+void advance_prespec(CallSiteSummary* s) {
+    uint8_t prev = 1 - s->active;
+    bool stable = s->windows[prev].count > 0 &&
+                  ks_stable(s->windows[s->active].hist,
+                             s->windows[prev].hist, KS_ALPHA);
+    if (stable) {
+        ++s->stable_windows;
+        if (s->stable_windows >= STABLE_WINDOWS_NEEDED) {
+            s->baseline  = s->windows[s->active].hist;
+            s->candidate = s->windows[s->active].hist.is_monomorphic(0.95)
+                               ? Strategy::BumpAlloc
+                               : Strategy::ThreadLocalFreeList;
+            s->phase = Phase::Compiled;
+            return;
+        }
+    } else {
+        s->stable_windows = 0;
+    }
+    s->windows[s->active].reset();
+    s->active = 1 - s->active;
+}
+
+void check_postspec(CallSiteSummary* s) {
+    if (!ks_stable(s->post_window.hist, s->baseline, KS_ALPHA)) {
+        s->phase = Phase::Deopt;
+        s->stable_windows = 0;
+        s->windows[0].reset();
+        s->windows[1].reset();
+        s->active = 0;
+    }
+    s->post_window.reset();
 }
 
 } // namespace
 
 void init() {
-    g_summaries = static_cast<CallSiteSummary*>(
-        alloc::alloc(sizeof(CallSiteSummary) * MAX_CALL_SITES,
-                     alignof(CallSiteSummary)));
+    alloc::init();
+    init_state();
 }
 
-void submit(const AllocEvent& ev) {
+void init_state() {
+    if (!g_summaries) {
+        // The summary array is ~256 MiB for MAX_CALL_SITES=4096 — too large
+        // for the 4 MiB internal bump arena. Use mmap directly.
+        const size_t sz = sizeof(CallSiteSummary) * MAX_CALL_SITES;
+        void* mem = mmap(nullptr, sz, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        g_summaries = static_cast<CallSiteSummary*>(mem);
+    }
+    reset_state();
+}
+
+void reset_state() {
+    if (!g_summaries) return;  // init_state not yet called
+    // Only clear the used slots (mmap pages already zero-initialized at first use)
+    for (size_t i = 0; i < g_summary_count; ++i)
+        new (&g_summaries[i]) CallSiteSummary{};
+    g_summary_count = 0;
+}
+
+void process_event(const AllocEvent& ev) {
+    if (ev.size == 0 || ev.size >= ExactHistogram::MAX_SIZE) return;
     CallSiteSummary* s = find_or_create(ev.call_site);
     if (!s) return;
     ++s->event_count;
-    // TODO: update size/lifetime histograms, run KS test every STABILITY_WINDOW
+
+    if (s->phase == Phase::Deopt) s->phase = Phase::PreSpec;
+
+    if (s->phase == Phase::PreSpec) {
+        s->windows[s->active].record(ev.size);
+        if (s->windows[s->active].full()) advance_prespec(s);
+    } else {
+        s->post_window.record(ev.size);
+        if (s->post_window.full()) check_postspec(s);
+    }
+}
+
+Phase get_phase(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i)
+        if (g_summaries[i].id == id) return g_summaries[i].phase;
+    return Phase::PreSpec;
+}
+
+Strategy get_candidate_strategy(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i)
+        if (g_summaries[i].id == id) return g_summaries[i].candidate;
+    return Strategy::Generic;
 }
 
 void run() {
-    // TODO: background thread loop — drain ring buffers, call submit, trigger codegen
+    // Implemented in Task 6
 }
 
 } // namespace tbjit::analysis
