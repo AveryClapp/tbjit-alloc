@@ -2,6 +2,7 @@
 #include "alloc/alloc.h"
 #include <atomic>
 #include <cassert>
+#include <new>
 
 // Dispatch table: maps CallSiteID -> compiled routine.
 // Reads are lock-free (atomic pointer load on hot path).

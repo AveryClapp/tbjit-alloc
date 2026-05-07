@@ -1,17 +1,35 @@
 #include "trace/trace.h"
 #include "alloc/alloc.h"
 #include <cassert>
+#include <pthread.h>
 
-int main() {
+static void test_registry_non_null() {
     tbjit::alloc::init();
     tbjit::trace::init();
+    void* fake = reinterpret_cast<void*>(0x1000);
+    tbjit::trace::record_alloc(1, 48, fake);
+    assert(tbjit::trace::ring_head() != nullptr);
+}
 
-    // Record a batch of alloc events and verify no crash.
-    for (int i = 0; i < 100; ++i) {
-        void* fake_ptr = reinterpret_cast<void*>(0x1000 + i);
-        tbjit::trace::record_alloc(static_cast<tbjit::CallSiteID>(i), 64, fake_ptr);
-        tbjit::trace::record_free(static_cast<tbjit::CallSiteID>(i), fake_ptr);
-    }
+static void* thread_push(void*) {
+    void* fake = reinterpret_cast<void*>(0x2000);
+    tbjit::trace::record_alloc(2, 64, fake);
+    return nullptr;
+}
 
+static void test_registry_multithread() {
+    pthread_t t;
+    pthread_create(&t, nullptr, thread_push, nullptr);
+    pthread_join(t, nullptr);
+
+    int count = 0;
+    tbjit::trace::RingBuffer* n = tbjit::trace::ring_head();
+    while (n) { ++count; n = n->next.load(std::memory_order_relaxed); }
+    assert(count >= 2);
+}
+
+int main() {
+    test_registry_non_null();
+    test_registry_multithread();
     return 0;
 }
