@@ -40,8 +40,10 @@ void tbjit_init() {
 
 __attribute__((destructor))
 void tbjit_fini() {
-    tbjit::trace::writer_close();
     tbjit::analysis::stop_background_thread();
+    tbjit::trace::writer_close();
+    if (getenv("TBJIT_DUMP"))
+        tbjit::analysis::dump_stats();
 }
 
 } // namespace
