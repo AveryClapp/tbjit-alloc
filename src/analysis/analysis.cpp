@@ -3,6 +3,7 @@
 #include "analysis/futex.h"
 #include "alloc/alloc.h"
 #include "trace/trace.h"
+#include "trace/writer.h"
 #include <new>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -11,14 +12,14 @@
 
 namespace tbjit::analysis {
 
+CallSiteSummary* g_summaries     = nullptr;
+size_t           g_summary_count = 0;
+
 namespace {
 
 constexpr size_t   MAX_CALL_SITES        = 4096;
 constexpr uint32_t STABLE_WINDOWS_NEEDED = 10;
 constexpr double   KS_ALPHA              = 0.05;
-
-CallSiteSummary* g_summaries     = nullptr;
-size_t           g_summary_count = 0;
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -74,6 +75,8 @@ bool drain_all() {
         AllocEvent ev;
         while (rb->pop(ev)) {
             process_event(ev);
+            if (tbjit::trace::writer_active())
+                tbjit::trace::writer_write(ev);
             g_events_processed.fetch_add(1, std::memory_order_relaxed);
             found = true;
         }

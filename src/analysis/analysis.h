@@ -42,5 +42,6 @@ void     run();  // background thread entry point (Task 6)
 void     start_background_thread();
 void     stop_background_thread();
 uint64_t events_processed();
+void     dump_stats();
 
 } // namespace tbjit::analysis

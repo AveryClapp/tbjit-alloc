@@ -12,14 +12,16 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT UNIX OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-  message(FATAL_ERROR "tbjit-alloc requires Linux x86-64")
+  message(WARNING "tbjit-alloc targets Linux x86-64; building on host for dev/test only")
 endif()
 
 set(TBJIT_SOURCES
   src/alloc/alloc.cpp
   src/trace/trace.cpp
+  src/trace/writer.cpp
   src/trace/trampoline.cpp
   src/analysis/analysis.cpp
+  src/analysis/dump.cpp
   src/codegen/codegen.cpp
   src/dispatch/dispatch.cpp
   src/deopt/deopt.cpp
