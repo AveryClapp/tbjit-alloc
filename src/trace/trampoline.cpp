@@ -1,4 +1,5 @@
 #include "trace.h"
+#include "trace/writer.h"
 #include "dispatch/dispatch.h"
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
@@ -33,10 +34,13 @@ void tbjit_init() {
     tbjit::deopt::init();
     tbjit::analysis::init();
     tbjit::analysis::start_background_thread();
+    const char* trace_path = getenv("TBJIT_TRACE");
+    if (trace_path) tbjit::trace::writer_open(trace_path);
 }
 
 __attribute__((destructor))
 void tbjit_fini() {
+    tbjit::trace::writer_close();
     tbjit::analysis::stop_background_thread();
 }
 
