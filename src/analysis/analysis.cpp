@@ -1,8 +1,13 @@
 #include "analysis/analysis.h"
 #include "analysis/ks_test.h"
+#include "analysis/futex.h"
 #include "alloc/alloc.h"
+#include "trace/trace.h"
 #include <new>
 #include <sys/mman.h>
+#include <pthread.h>
+#include <time.h>
+#include <atomic>
 
 namespace tbjit::analysis {
 
@@ -14,6 +19,10 @@ constexpr double   KS_ALPHA              = 0.05;
 
 CallSiteSummary* g_summaries     = nullptr;
 size_t           g_summary_count = 0;
+
+std::atomic<bool>     g_running{false};
+std::atomic<uint64_t> g_events_processed{0};
+pthread_t             g_thread;
 
 CallSiteSummary* find_or_create(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i)
@@ -56,6 +65,40 @@ void check_postspec(CallSiteSummary* s) {
         s->active = 0;
     }
     s->post_window.reset();
+}
+
+bool drain_all() {
+    bool found = false;
+    tbjit::trace::RingBuffer* rb = tbjit::trace::ring_head();
+    while (rb) {
+        AllocEvent ev;
+        while (rb->pop(ev)) {
+            process_event(ev);
+            g_events_processed.fetch_add(1, std::memory_order_relaxed);
+            found = true;
+        }
+        rb = rb->next.load(std::memory_order_acquire);
+    }
+    return found;
+}
+
+void* background_loop(void*) {
+    uint32_t backoff_us = 1;
+    while (g_running.load(std::memory_order_acquire)) {
+        if (drain_all()) {
+            backoff_us = 1;
+            continue;
+        }
+        if (backoff_us < 500) {
+            struct timespec ts{0, static_cast<long>(backoff_us) * 1000L};
+            nanosleep(&ts, nullptr);
+            backoff_us = (backoff_us * 2 < 500) ? backoff_us * 2 : 500;
+        } else {
+            futex_wait();
+        }
+    }
+    drain_all(); // final drain on shutdown
+    return nullptr;
 }
 
 } // namespace
@@ -115,7 +158,22 @@ Strategy get_candidate_strategy(CallSiteID id) {
 }
 
 void run() {
-    // Implemented in Task 6
+    start_background_thread();
+}
+
+void start_background_thread() {
+    g_running.store(true, std::memory_order_release);
+    pthread_create(&g_thread, nullptr, background_loop, nullptr);
+}
+
+void stop_background_thread() {
+    g_running.store(false, std::memory_order_release);
+    futex_wake();
+    pthread_join(g_thread, nullptr);
+}
+
+uint64_t events_processed() {
+    return g_events_processed.load(std::memory_order_relaxed);
 }
 
 } // namespace tbjit::analysis

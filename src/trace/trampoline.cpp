@@ -2,6 +2,7 @@
 #include "dispatch/dispatch.h"
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
+#include "analysis/analysis.h"
 #include "common.h"
 #include <cstdlib>
 #include <dlfcn.h>
@@ -30,6 +31,13 @@ void tbjit_init() {
     tbjit::trace::init();
     tbjit::dispatch::init();
     tbjit::deopt::init();
+    tbjit::analysis::init();
+    tbjit::analysis::start_background_thread();
+}
+
+__attribute__((destructor))
+void tbjit_fini() {
+    tbjit::analysis::stop_background_thread();
 }
 
 } // namespace
