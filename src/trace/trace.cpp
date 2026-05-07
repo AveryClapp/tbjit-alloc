@@ -1,5 +1,6 @@
 #include "trace/trace.h"
 #include "alloc/alloc.h"
+#include "analysis/futex.h"
 #include <atomic>
 #include <cstdint>
 #include <new>
@@ -64,12 +65,14 @@ void init() {
 
 void record_alloc(CallSiteID id, size_t size, void* ptr) {
     AllocEvent ev{id, static_cast<uint32_t>(size), rdtsc(), next_thread_id(), ptr};
-    get_ring()->push(ev);
+    if (get_ring()->push(ev))
+        tbjit::analysis::notify_if_sleeping();
 }
 
 void record_free(CallSiteID id, void* ptr) {
     AllocEvent ev{id, 0, rdtsc(), next_thread_id(), ptr};
-    get_ring()->push(ev);
+    if (get_ring()->push(ev))
+        tbjit::analysis::notify_if_sleeping();
 }
 
 RingBuffer* ring_head() {
