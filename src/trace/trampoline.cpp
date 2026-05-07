@@ -1,7 +1,9 @@
 #include "trace.h"
+#include "trace/writer.h"
 #include "dispatch/dispatch.h"
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
+#include "analysis/analysis.h"
 #include "common.h"
 #include <cstdlib>
 #include <dlfcn.h>
@@ -30,6 +32,18 @@ void tbjit_init() {
     tbjit::trace::init();
     tbjit::dispatch::init();
     tbjit::deopt::init();
+    tbjit::analysis::init();
+    tbjit::analysis::start_background_thread();
+    const char* trace_path = getenv("TBJIT_TRACE");
+    if (trace_path) tbjit::trace::writer_open(trace_path);
+}
+
+__attribute__((destructor))
+void tbjit_fini() {
+    tbjit::analysis::stop_background_thread();
+    tbjit::trace::writer_close();
+    if (getenv("TBJIT_DUMP"))
+        tbjit::analysis::dump_stats();
 }
 
 } // namespace
