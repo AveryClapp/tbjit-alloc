@@ -30,6 +30,7 @@ struct CallSiteSummary {
     SizeWindow     post_window;
 
     Strategy    candidate{Strategy::Generic};
+    void*       code_page{nullptr};
 };
 
 void     init();

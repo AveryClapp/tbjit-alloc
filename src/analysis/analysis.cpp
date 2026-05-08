@@ -4,6 +4,8 @@
 #include "alloc/alloc.h"
 #include "trace/trace.h"
 #include "trace/writer.h"
+#include "codegen/codegen.h"
+#include "dispatch/dispatch.h"
 #include <new>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -48,6 +50,16 @@ void advance_prespec(CallSiteSummary* s) {
                                ? Strategy::BumpAlloc
                                : Strategy::ThreadLocalFreeList;
             s->phase = Phase::Compiled;
+            {
+                codegen::RoutineSpec spec{s->id, s->candidate,
+                    s->windows[s->active].hist.dominant_size()};
+                void* routine = codegen::compile(spec);
+                if (routine) {
+                    dispatch::install(s->id,
+                        reinterpret_cast<dispatch::RoutineFn>(routine));
+                    s->code_page = routine;
+                }
+            }
             return;
         }
     } else {
