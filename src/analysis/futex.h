@@ -23,7 +23,8 @@ inline void futex_wait() {
     futex_word().compare_exchange_strong(expected, SLEEPING,
         std::memory_order_acq_rel, std::memory_order_relaxed);
     uint32_t* addr = reinterpret_cast<uint32_t*>(&futex_word());
-    syscall(SYS_futex, addr, FUTEX_WAIT, SLEEPING, nullptr, nullptr, 0);
+    struct timespec timeout{1, 0};  // 1s timeout: bounds missed-wakeup hang
+    syscall(SYS_futex, addr, FUTEX_WAIT, SLEEPING, &timeout, nullptr, 0);
     futex_word().store(AWAKE, std::memory_order_release);
 #endif
 }

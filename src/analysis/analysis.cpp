@@ -109,6 +109,10 @@ void* background_loop(void*) {
             nanosleep(&ts, nullptr);
             backoff_us = (backoff_us * 2 < 500) ? backoff_us * 2 : 500;
         } else {
+            // Re-check g_running before parking: stop_background_thread() may
+            // have set it false and called futex_wake() before we reached here,
+            // which would cause us to sleep with no further wakeup pending.
+            if (!g_running.load(std::memory_order_acquire)) break;
             futex_wait();
         }
     }
