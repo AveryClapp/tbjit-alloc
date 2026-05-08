@@ -49,7 +49,7 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
                        uint32_t dominant_size, uint32_t call_site_id,
                        void* deopt_handler, void* slow_init_fn,
                        void* real_malloc) {
-    if (!buf || buf_size < 128) return 0;
+    if (!buf || buf_size < 200) return 0;
 
     uint8_t* p = buf;
 

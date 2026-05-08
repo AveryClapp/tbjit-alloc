@@ -5,7 +5,7 @@
 namespace tbjit::codegen {
 
 // Emits the BumpAlloc routine into buf. Returns bytes written, or 0 on error.
-// buf must be at least 128 bytes (200 recommended to be safe).
+// buf must be at least 200 bytes.
 // Calling convention: rdi = requested size, returns ptr in rax.
 // tls_ptr_offset = index * sizeof(BumpSlot)      (byte offset into fs: segment)
 // tls_end_offset = index * sizeof(BumpSlot) + 8
