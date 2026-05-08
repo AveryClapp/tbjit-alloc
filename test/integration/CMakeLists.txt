@@ -1,6 +1,16 @@
 # Integration tests: small target programs run under LD_PRELOAD.
 # Each test links against nothing from tbjit -- it goes through the preload interface.
 
+function(add_integration_test name src)
+  add_executable(${name} ${src})
+  target_link_libraries(${name} PRIVATE tbjit_obj)
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_compile_options(${name} PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_integration_test(test_jit_roundtrip test_jit_roundtrip.cpp)
+
 add_executable(int_hello hello.cpp)
 
 # Basic: just check process exits 0 under LD_PRELOAD
