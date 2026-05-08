@@ -33,28 +33,17 @@ add_test(
 # Manual verification: run with 2>dump.txt and inspect
 
 # End-to-end JIT verification: Linux only (LD_PRELOAD is a no-op on macOS).
-# int_jit_compiled: asserts a call site reached Compiled+BumpAlloc state.
-# int_jit_count:    asserts the JIT dispatch path was actually taken (>0 allocs).
+# Asserts a call site reached Compiled+BumpAlloc state AND that the JIT
+# dispatch path was actually taken (>0 jit_allocs in TBJIT_DUMP output).
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(
-    NAME int_jit_compiled
+    NAME int_jit_verified
     COMMAND ${CMAKE_COMMAND} -E env
       LD_PRELOAD=$<TARGET_FILE:tbjit>
       TBJIT_DUMP=1
       $<TARGET_FILE:int_hello>
   )
-  set_tests_properties(int_jit_compiled PROPERTIES
-    PASS_REGULAR_EXPRESSION "BumpAlloc"
-  )
-
-  add_test(
-    NAME int_jit_count
-    COMMAND ${CMAKE_COMMAND} -E env
-      LD_PRELOAD=$<TARGET_FILE:tbjit>
-      TBJIT_DUMP=1
-      $<TARGET_FILE:int_hello>
-  )
-  set_tests_properties(int_jit_count PROPERTIES
-    PASS_REGULAR_EXPRESSION "jit_allocs:[ \t]*[1-9][0-9]*"
+  set_tests_properties(int_jit_verified PROPERTIES
+    PASS_REGULAR_EXPRESSION "BumpAlloc;jit_allocs:[ \t]*[1-9][0-9]*"
   )
 endif()
