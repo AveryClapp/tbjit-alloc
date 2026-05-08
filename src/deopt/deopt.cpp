@@ -4,6 +4,12 @@
 #include "analysis/analysis.h"
 #include <atomic>
 
+// Prototype limitation: g_pending/g_pending_count and the CallSiteSummary
+// fields accessed via reset_call_site() are not protected by a mutex.
+// handle() may race with the analysis background thread and with concurrent
+// deopt from other allocator threads. Production would require per-summary
+// locks or a lock-free epoch-based design for the summary updates.
+
 namespace tbjit::deopt {
 
 namespace {

@@ -52,7 +52,8 @@ void tbjit_fini() {
 extern "C" {
 
 void* malloc(size_t size) {
-    if (reentrancy_guard || !g_real_malloc) return g_real_malloc(size);
+    if (!g_real_malloc) return nullptr;  // pre-init: dlsym not yet complete
+    if (reentrancy_guard) return g_real_malloc(size);
     reentrancy_guard = true;
     tbjit::deopt::mark_safe_point();
 

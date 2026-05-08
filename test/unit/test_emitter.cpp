@@ -19,7 +19,7 @@ static void* stub_malloc(size_t sz) {
 static void test_emit_produces_bytes() {
     uint8_t buf[256] = {};
     uint32_t idx = tbjit::codegen::alloc_slot_index();
-    size_t n = tbjit::codegen::emit_bump_alloc(
+    [[maybe_unused]] size_t n = tbjit::codegen::emit_bump_alloc(
         buf, sizeof(buf),
         idx * 16, idx * 16 + 8,
         48, 99,
