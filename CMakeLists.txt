@@ -23,6 +23,7 @@ set(TBJIT_SOURCES
   src/analysis/analysis.cpp
   src/analysis/dump.cpp
   src/codegen/codegen.cpp
+  src/codegen/tls.cpp
   src/dispatch/dispatch.cpp
   src/deopt/deopt.cpp
 )
