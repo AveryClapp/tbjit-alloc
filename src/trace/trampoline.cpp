@@ -5,6 +5,7 @@
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
 #include "common.h"
+#include <atomic>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -17,6 +18,9 @@
 
 // g_real_malloc is extern so codegen.cpp can embed its address in JIT stubs.
 void* (*g_real_malloc)(size_t) = nullptr;
+
+std::atomic<uint64_t> g_jit_allocs{0};
+std::atomic<uint64_t> g_generic_allocs{0};
 
 namespace {
 
@@ -63,8 +67,10 @@ void* malloc(size_t size) {
     tbjit::dispatch::RoutineFn fn = tbjit::dispatch::lookup(id);
     void* ptr;
     if (__builtin_expect(fn != nullptr, 1)) {
+        g_jit_allocs.fetch_add(1, std::memory_order_relaxed);
         ptr = fn(size);
     } else {
+        g_generic_allocs.fetch_add(1, std::memory_order_relaxed);
         ptr = g_real_malloc(size);
         tbjit::trace::record_alloc(id, size, ptr);
     }

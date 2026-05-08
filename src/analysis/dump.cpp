@@ -1,6 +1,11 @@
 #include "analysis/analysis.h"
 #include "analysis/histogram.h"
+#include <atomic>
 #include <cstdio>
+
+// Counters defined at global scope in trampoline.cpp.
+extern std::atomic<uint64_t> g_jit_allocs;
+extern std::atomic<uint64_t> g_generic_allocs;
 
 // Access internal analysis state. These are defined in analysis.cpp.
 // We declare them extern rather than exposing them in the header.
@@ -41,6 +46,11 @@ void dump_stats() {
                 h.quantile(0.99),
                 stable, strategy);
     }
+
+    fprintf(stderr, "\njit_allocs:     %lu\n",
+            static_cast<unsigned long>(g_jit_allocs.load(std::memory_order_relaxed)));
+    fprintf(stderr, "generic_allocs: %lu\n",
+            static_cast<unsigned long>(g_generic_allocs.load(std::memory_order_relaxed)));
 }
 
 } // namespace tbjit::analysis
