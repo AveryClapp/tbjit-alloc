@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #ifdef __linux__
+#include <time.h>
 #include <unistd.h>
 #include <linux/futex.h>
 #include <sys/syscall.h>
