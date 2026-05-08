@@ -6,7 +6,7 @@ static void test_prespec_triggers_compiled() {
     tbjit::alloc::init();
     tbjit::analysis::init_state();
 
-    for (int i = 0; i < 10'000; ++i) {
+    for (int i = 0; i < 11'000; ++i) {
         tbjit::AllocEvent ev{1, 48, 0, 0, nullptr};
         tbjit::analysis::process_event(ev);
     }
@@ -16,10 +16,14 @@ static void test_prespec_triggers_compiled() {
 static void test_prespec_unstable_stays_prespec() {
     tbjit::analysis::reset_state();
 
-    for (int i = 0; i < 10'000; ++i) {
-        uint32_t size = (i % 2 == 0) ? 48 : 128;
-        tbjit::AllocEvent ev{2, size, 0, 0, nullptr};
-        tbjit::analysis::process_event(ev);
+    // Each window of 1000 events alternates between all-48 and all-128.
+    // Consecutive windows always have different distributions → KS always unstable.
+    for (int w = 0; w < 22; ++w) {
+        uint32_t size = (w % 2 == 0) ? 48 : 128;
+        for (int i = 0; i < 1000; ++i) {
+            tbjit::AllocEvent ev{2, size, 0, 0, nullptr};
+            tbjit::analysis::process_event(ev);
+        }
     }
     assert(tbjit::analysis::get_phase(2) == tbjit::analysis::Phase::PreSpec);
 }
@@ -28,7 +32,7 @@ static void test_compiled_drift_causes_deopt() {
     tbjit::analysis::reset_state();
 
     // Establish compiled state with size=48
-    for (int i = 0; i < 10'000; ++i) {
+    for (int i = 0; i < 11'000; ++i) {
         tbjit::AllocEvent ev{3, 48, 0, 0, nullptr};
         tbjit::analysis::process_event(ev);
     }
@@ -46,7 +50,7 @@ static void test_compiled_drift_causes_deopt() {
 static void test_candidate_strategy_monomorphic() {
     tbjit::analysis::reset_state();
 
-    for (int i = 0; i < 10'000; ++i) {
+    for (int i = 0; i < 11'000; ++i) {
         tbjit::AllocEvent ev{4, 48, 0, 0, nullptr};
         tbjit::analysis::process_event(ev);
     }

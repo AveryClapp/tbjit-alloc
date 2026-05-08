@@ -53,8 +53,8 @@ void advance_prespec(CallSiteSummary* s) {
     } else {
         s->stable_windows = 0;
     }
-    s->windows[s->active].reset();
     s->active = 1 - s->active;
+    s->windows[s->active].reset();
 }
 
 void check_postspec(CallSiteSummary* s) {
