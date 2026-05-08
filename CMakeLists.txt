@@ -24,6 +24,7 @@ set(TBJIT_SOURCES
   src/analysis/dump.cpp
   src/codegen/codegen.cpp
   src/codegen/tls.cpp
+  src/codegen/slow_init.cpp
   src/dispatch/dispatch.cpp
   src/deopt/deopt.cpp
 )
