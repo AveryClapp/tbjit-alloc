@@ -4,6 +4,8 @@
 #include "alloc/alloc.h"
 #include "trace/trace.h"
 #include "trace/writer.h"
+#include "codegen/codegen.h"
+#include "dispatch/dispatch.h"
 #include <new>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -48,13 +50,23 @@ void advance_prespec(CallSiteSummary* s) {
                                ? Strategy::BumpAlloc
                                : Strategy::ThreadLocalFreeList;
             s->phase = Phase::Compiled;
+            {
+                codegen::RoutineSpec spec{s->id, s->candidate,
+                    s->windows[s->active].hist.dominant_size()};
+                void* routine = codegen::compile(spec);
+                if (routine) {
+                    dispatch::install(s->id,
+                        reinterpret_cast<dispatch::RoutineFn>(routine));
+                    s->code_page = routine;
+                }
+            }
             return;
         }
     } else {
         s->stable_windows = 0;
     }
-    s->windows[s->active].reset();
     s->active = 1 - s->active;
+    s->windows[s->active].reset();
 }
 
 void check_postspec(CallSiteSummary* s) {
@@ -158,6 +170,20 @@ Strategy get_candidate_strategy(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i)
         if (g_summaries[i].id == id) return g_summaries[i].candidate;
     return Strategy::Generic;
+}
+
+void reset_call_site(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i) {
+        if (g_summaries[i].id == id) {
+            g_summaries[i].phase = Phase::Deopt;
+            g_summaries[i].code_page = nullptr;
+            g_summaries[i].stable_windows = 0;
+            g_summaries[i].windows[0].reset();
+            g_summaries[i].windows[1].reset();
+            g_summaries[i].active = 0;
+            return;
+        }
+    }
 }
 
 void run() {
