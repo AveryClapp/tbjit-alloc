@@ -4,7 +4,7 @@
 
 namespace tbjit::codegen {
 
-constexpr size_t BUMP_REGION_SIZE = 256 * 1024;  // 256 KB per thread per site
+constexpr size_t BUMP_REGION_SIZE = 256 * 1024;
 
 // Called from emitted slow path. mmaps a fresh region, installs it into
 // tl_bumps[index], and returns the first allocation pointer.
