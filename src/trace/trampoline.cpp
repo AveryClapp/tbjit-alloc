@@ -15,20 +15,21 @@
 // internals legitimately call the real allocator (they shouldn't,
 // but this is a safety net during development).
 
+// g_real_malloc is extern so codegen.cpp can embed its address in JIT stubs.
+void* (*g_real_malloc)(size_t) = nullptr;
+
 namespace {
 
 thread_local bool reentrancy_guard = false;
 
-using malloc_fn = void* (*)(size_t);
-using free_fn   = void  (*)(void*);
+using free_fn = void (*)(void*);
 
-malloc_fn real_malloc = nullptr;
-free_fn   real_free   = nullptr;
+free_fn real_free = nullptr;
 
 __attribute__((constructor))
 void tbjit_init() {
-    real_malloc = reinterpret_cast<malloc_fn>(dlsym(RTLD_NEXT, "malloc"));
-    real_free   = reinterpret_cast<free_fn>(dlsym(RTLD_NEXT, "free"));
+    g_real_malloc = reinterpret_cast<void* (*)(size_t)>(dlsym(RTLD_NEXT, "malloc"));
+    real_free      = reinterpret_cast<free_fn>(dlsym(RTLD_NEXT, "free"));
     tbjit::trace::init();
     tbjit::dispatch::init();
     tbjit::deopt::init();
@@ -51,7 +52,7 @@ void tbjit_fini() {
 extern "C" {
 
 void* malloc(size_t size) {
-    if (reentrancy_guard || !real_malloc) return real_malloc(size);
+    if (reentrancy_guard || !g_real_malloc) return g_real_malloc(size);
     reentrancy_guard = true;
     tbjit::deopt::mark_safe_point();
 
@@ -63,7 +64,7 @@ void* malloc(size_t size) {
     if (__builtin_expect(fn != nullptr, 1)) {
         ptr = fn(size);
     } else {
-        ptr = real_malloc(size);
+        ptr = g_real_malloc(size);
         tbjit::trace::record_alloc(id, size, ptr);
     }
 
