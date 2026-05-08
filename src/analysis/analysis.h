@@ -39,6 +39,7 @@ void     reset_state();
 void     process_event(const AllocEvent& ev);
 Phase    get_phase(CallSiteID id);
 Strategy get_candidate_strategy(CallSiteID id);
+void     reset_call_site(CallSiteID id);
 void     run();  // background thread entry point (Task 6)
 void     start_background_thread();
 void     stop_background_thread();

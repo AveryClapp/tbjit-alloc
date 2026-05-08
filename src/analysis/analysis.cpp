@@ -172,6 +172,20 @@ Strategy get_candidate_strategy(CallSiteID id) {
     return Strategy::Generic;
 }
 
+void reset_call_site(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i) {
+        if (g_summaries[i].id == id) {
+            g_summaries[i].phase = Phase::Deopt;
+            g_summaries[i].code_page = nullptr;
+            g_summaries[i].stable_windows = 0;
+            g_summaries[i].windows[0].reset();
+            g_summaries[i].windows[1].reset();
+            g_summaries[i].active = 0;
+            return;
+        }
+    }
+}
+
 void run() {
     start_background_thread();
 }
