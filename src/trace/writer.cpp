@@ -1,11 +1,13 @@
 #include "trace/writer.h"
 #include <cstdio>
 #include <ctime>
+#include <pthread.h>
 
 namespace tbjit::trace {
 
 namespace {
 FILE* g_file = nullptr;
+pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 }
 
 void writer_open(const char* path) {
@@ -23,15 +25,19 @@ void writer_open(const char* path) {
 }
 
 void writer_write(const AllocEvent& ev) {
+    pthread_mutex_lock(&g_mutex);
     if (g_file) fwrite(&ev, sizeof(ev), 1, g_file);
+    pthread_mutex_unlock(&g_mutex);
 }
 
 void writer_close() {
+    pthread_mutex_lock(&g_mutex);
     if (g_file) {
         fflush(g_file);
         fclose(g_file);
         g_file = nullptr;
     }
+    pthread_mutex_unlock(&g_mutex);
 }
 
 bool writer_active() { return g_file != nullptr; }

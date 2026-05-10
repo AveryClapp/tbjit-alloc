@@ -20,6 +20,7 @@ Arena g_arena{};
 } // namespace
 
 void init() {
+    if (g_arena.base) return;
     void* mem = mmap(nullptr, ARENA_SIZE, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(mem != MAP_FAILED);

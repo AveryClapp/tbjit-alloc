@@ -22,6 +22,7 @@ static void test_emit_produces_bytes() {
     [[maybe_unused]] size_t n = tbjit::codegen::emit_bump_alloc(
         buf, sizeof(buf),
         idx * 16, idx * 16 + 8,
+        idx,
         48, 99,
         reinterpret_cast<void*>(stub_deopt),
         reinterpret_cast<void*>(tbjit::codegen::bump_slow_init),
@@ -36,9 +37,15 @@ static void test_emitted_routine_executes_fast_path() {
     assert(page != MAP_FAILED);
 
     uint32_t idx = tbjit::codegen::alloc_slot_index();
+    uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
+    uint32_t ptr_off = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&tbjit::codegen::tl_bumps[idx].ptr) - tp);
+    uint32_t end_off = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&tbjit::codegen::tl_bumps[idx].end) - tp);
     size_t n = tbjit::codegen::emit_bump_alloc(
         static_cast<uint8_t*>(page), 4096,
-        idx * 16, idx * 16 + 8,
+        ptr_off, end_off,
+        idx,
         48, 100,
         reinterpret_cast<void*>(stub_deopt),
         reinterpret_cast<void*>(tbjit::codegen::bump_slow_init),

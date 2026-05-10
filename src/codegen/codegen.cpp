@@ -34,13 +34,22 @@ void* compile(const RoutineSpec& spec) {
     uint32_t idx = alloc_slot_index();
     if (idx >= static_cast<uint32_t>(MAX_COMPILED_SITES)) return nullptr;
 
+#if defined(__linux__) && defined(__x86_64__)
+    uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
+    uint32_t ptr_off = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&tl_bumps[idx].ptr) - tp);
+    uint32_t end_off = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&tl_bumps[idx].end) - tp);
+#else
     uint32_t ptr_off = idx * static_cast<uint32_t>(sizeof(BumpSlot));
-    uint32_t end_off = ptr_off + 8;
+    uint32_t end_off = ptr_off + static_cast<uint32_t>(sizeof(uint8_t*));
+#endif
 
     uint8_t* page = static_cast<uint8_t*>(alloc_exec_page());
     size_t n = emit_bump_alloc(
         page, CODE_PAGE_SIZE,
         ptr_off, end_off,
+        idx,
         spec.size, spec.id,
         reinterpret_cast<void*>(tbjit::deopt::handle),
         reinterpret_cast<void*>(bump_slow_init),

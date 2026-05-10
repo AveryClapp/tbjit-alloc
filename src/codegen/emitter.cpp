@@ -46,6 +46,7 @@ uint8_t* w64(uint8_t* p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
 
 size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
                        uint32_t tls_ptr_offset, uint32_t tls_end_offset,
+                       uint32_t slot_index,
                        uint32_t dominant_size, uint32_t call_site_id,
                        void* deopt_handler, void* slow_init_fn,
                        void* real_malloc) {
@@ -140,8 +141,6 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
     // --- .init label (falls through from .slow when rax==0) ---
 
     // mov edi, slot_index  (BF <imm32>)
-    // slot_index = tls_ptr_offset / sizeof(BumpSlot) = tls_ptr_offset / 16
-    uint32_t slot_index = tls_ptr_offset / 16;
     p = w8(p, 0xBF);
     p = w32(p, slot_index);
 
