@@ -75,6 +75,7 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     if (!mem) return nullptr;
     auto* h = static_cast<SegmentHeader*>(mem);
     h->strategy     = s;
+    h->retired      = false;
     h->slot_index   = slot;
     h->alloc_site   = site;
     h->owner_tid    = current_tid();
@@ -87,6 +88,28 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     h->next_in_site = nullptr;
     register_segment(h);
     return h;
+}
+
+size_t reaper_sweep(LifetimePredicate pred) {
+    // Snapshot eligible segments under the index lock, then munmap outside it
+    // so munmap doesn't block other threads' registration.
+    SegmentHeader* eligible[MAX_SEGMENTS];
+    size_t n_eligible = 0;
+
+    pthread_mutex_lock(&g_index_mutex);
+    size_t n = g_index_count.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < n; ++i) {
+        SegmentHeader* h = g_index[i].load(std::memory_order_relaxed);
+        if (!h || !h->retired) continue;
+        if (h->live_chunks.load(std::memory_order_acquire) != 0) continue;
+        if (pred && !pred(h->alloc_site)) continue;
+        eligible[n_eligible++] = h;
+    }
+    pthread_mutex_unlock(&g_index_mutex);
+
+    for (size_t i = 0; i < n_eligible; ++i)
+        free_segment(eligible[i]);
+    return n_eligible;
 }
 
 void free_segment(SegmentHeader* seg) {

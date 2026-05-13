@@ -11,19 +11,28 @@ constexpr uintptr_t SEGMENT_MASK = ~(static_cast<uintptr_t>(SEGMENT_SIZE) - 1);
 
 struct alignas(64) SegmentHeader {
     Strategy              strategy;
-    uint8_t               _pad0[3];
+    bool                  retired;        // true after a fresh active replaces it
+    uint8_t               _pad0[2];
     uint32_t              slot_index;
     CallSiteID            alloc_site;
     uint32_t              owner_tid;
-    std::atomic<uint32_t> live_chunks;
+    std::atomic<uint32_t> live_chunks;    // outstanding chunks (set at retire)
     uint32_t              chunk_size;
     uint32_t              retire_epoch;
+    uint32_t              _pad1;
     std::atomic<void*>    remote_head;
     uint8_t*              bump_ptr;
     uint8_t*              bump_limit;
     SegmentHeader*        next_in_site;
 };
 static_assert(sizeof(SegmentHeader) == 64, "header must be one cache line");
+
+// Number of chunks of `chunk_size` that fit in the payload of seg `s`.
+inline uint32_t chunks_in_segment(const SegmentHeader* s) {
+    if (s->chunk_size == 0) return 0;
+    size_t payload = SEGMENT_SIZE - sizeof(SegmentHeader);
+    return static_cast<uint32_t>(payload / s->chunk_size);
+}
 
 inline uint8_t* base_of(SegmentHeader* s) {
     return reinterpret_cast<uint8_t*>(s);
@@ -57,5 +66,11 @@ uint32_t current_tid();
 // resets remote_head.
 void  mpsc_push(SegmentHeader* seg, void* chunk);
 void* mpsc_harvest(SegmentHeader* seg);
+
+// Sweep all registered segments and munmap any that are eligible: retired,
+// live_chunks==0, and the alloc_site's lifetime tag (looked up via callback)
+// is Reap. Returns the number of segments reclaimed.
+using LifetimePredicate = bool (*)(CallSiteID alloc_site);
+size_t reaper_sweep(LifetimePredicate pred);
 
 } // namespace tbjit::seg

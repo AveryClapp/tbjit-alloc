@@ -19,26 +19,25 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
 void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 
-    // First: harvest any chunks foreign threads have pushed back via MPSC.
-    // Walk all segments owned by (this slot, this thread) and drain each.
-    void* harvested = nullptr;
-    for (seg::SegmentHeader* s = tl_freelists[index].segs; s;
-         s = s->next_in_site) {
-        void* chain = seg::mpsc_harvest(s);
-        while (chain) {
-            void* nxt = *static_cast<void**>(chain);
-            *static_cast<void**>(chain) = harvested;
-            harvested = chain;
-            chain = nxt;
+    // Harvest the active segment's MPSC remote queue first (foreign frees).
+    // Retired segments' queues are not harvested; chunks freed into them
+    // are accounted via live_chunks (decremented in the free trampoline).
+    seg::SegmentHeader* active = tl_freelists[index].segs;
+    if (active) {
+        void* harvested = seg::mpsc_harvest(active);
+        if (harvested) {
+            void* chunk = harvested;
+            tl_freelists[index].head = *static_cast<void**>(harvested);
+            return chunk;
         }
-    }
-    if (harvested) {
-        void* chunk = harvested;
-        tl_freelists[index].head = *static_cast<void**>(harvested);
-        return chunk;
+        // Active is drained: every chunk it ever produced is now in user
+        // code (head was null, MPSC empty). Retire it so the reaper can
+        // reclaim once all chunks are freed back.
+        active->live_chunks.store(
+            seg::chunks_in_segment(active), std::memory_order_release);
+        active->retired = true;
     }
 
-    // Nothing recovered — mmap a fresh segment.
     seg::SegmentHeader* s = seg::alloc_segment(
         Strategy::ThreadLocalFreeList, index,
         g_slot_to_site[index], obj_size);

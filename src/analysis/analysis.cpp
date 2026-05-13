@@ -187,10 +187,20 @@ bool drain_all() {
     return found;
 }
 
+// Used by the reaper to decide which retired segments are safe to munmap.
+// Only segments whose alloc_site is tagged Reap get reclaimed.
+bool reap_predicate(CallSiteID alloc_site) {
+    for (size_t i = 0; i < g_summary_count; ++i)
+        if (g_summaries[i].id == alloc_site)
+            return g_summaries[i].lifetime == LifetimeTag::Reap;
+    return false;
+}
+
 void* background_loop(void*) {
     uint32_t backoff_us = 1;
     while (g_running.load(std::memory_order_acquire)) {
         tbjit::deopt::drain_pending();
+        seg::reaper_sweep(reap_predicate);
         if (drain_all()) {
             backoff_us = 1;
             continue;
