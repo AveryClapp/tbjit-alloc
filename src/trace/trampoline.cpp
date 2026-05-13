@@ -4,6 +4,7 @@
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
+#include "codegen/slow_init.h"
 #include "common.h"
 #include <atomic>
 #include <cstdlib>
@@ -88,7 +89,10 @@ void free(void* ptr) {
     tbjit::CallSiteID id = tbjit::hash_return_addr(ra);
     tbjit::trace::record_free(id, ptr);
     tbjit::shadow::validate_free(id, ptr);
-    real_free(ptr);
+    // Pointers carved from a JIT bump region must not be passed to glibc's
+    // free — they live in an mmap'd 256 KiB block, not in the glibc heap.
+    if (!tbjit::codegen::is_in_bump_region(ptr))
+        real_free(ptr);
 
     reentrancy_guard = false;
 }
