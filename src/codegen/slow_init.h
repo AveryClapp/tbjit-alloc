@@ -13,6 +13,11 @@ constexpr size_t ARENA_REGION_SIZE    = 256 * 1024;
 // returns the first allocation pointer.
 uint8_t* bump_slow_init(uint32_t index, uint32_t size);
 
+// PairedStack uses the same bump alloc fast path; only the segment tag
+// differs. The free trampoline's PairedStack case keys off the tag to
+// rewind bump_ptr on a LIFO-matching free.
+uint8_t* paired_slow_init(uint32_t index, uint32_t size);
+
 // Called from emitted FreeListAlloc refill path. mmaps a fresh region,
 // chops it into chunks of obj_size, links them into a free list installed
 // at tl_freelists[index], registers the region, and pops one chunk to

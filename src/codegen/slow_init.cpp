@@ -16,6 +16,17 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
     return base;
 }
 
+uint8_t* paired_slow_init(uint32_t index, uint32_t size) {
+    seg::SegmentHeader* s = seg::alloc_segment(
+        Strategy::PairedStack, index, g_slot_to_site[index], size);
+    assert(s);
+    uint8_t* base = seg::payload_start(s);
+    tl_bumps[index].ptr = base + size;
+    tl_bumps[index].end = seg::segment_end(s);
+    s->bump_ptr  = base + size;
+    return base;
+}
+
 void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 

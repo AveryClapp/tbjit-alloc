@@ -98,6 +98,18 @@ void free(void* ptr) {
                 case tbjit::Strategy::BumpAlloc:
                 case tbjit::Strategy::EpochArena:
                     break;  // chunks live until segment reclaim
+                case tbjit::Strategy::PairedStack: {
+                    // LIFO rewind: if the freed ptr is exactly bump_ptr -
+                    // chunk_size, this was the most-recent alloc — rewind.
+                    // Otherwise the LIFO assumption is violated; drop the
+                    // chunk. Single-threaded by construction (detection
+                    // requires concentrated alloc/free on one site pair).
+                    uint8_t* rewound =
+                        s->bump_ptr - s->chunk_size;
+                    if (rewound == static_cast<uint8_t*>(ptr))
+                        s->bump_ptr = rewound;
+                    break;
+                }
                 case tbjit::Strategy::ThreadLocalFreeList: {
                     if (s->retired) {
                         s->live_chunks.fetch_sub(

@@ -36,6 +36,10 @@ void* compile(const RoutineSpec& spec) {
     Strategy effective = spec.strategy;
     if (effective == Strategy::ProducerConsumer)
         effective = Strategy::ThreadLocalFreeList;
+    // PairedStack keeps its own slow-init (segment tagged PairedStack so the
+    // free trampoline rewinds bump_ptr on a LIFO match). The alloc emitter
+    // is the bump emitter — fast path is identical to BumpAlloc.
+    bool paired_alloc = (effective == Strategy::PairedStack);
     if (effective == Strategy::PairedStack)
         effective = Strategy::BumpAlloc;
     if (effective != Strategy::BumpAlloc &&
@@ -74,7 +78,8 @@ void* compile(const RoutineSpec& spec) {
             idx,
             spec.size, spec.id,
             reinterpret_cast<void*>(tbjit::deopt::handle),
-            reinterpret_cast<void*>(bump_slow_init),
+            reinterpret_cast<void*>(paired_alloc ? paired_slow_init
+                                                 : bump_slow_init),
             reinterpret_cast<void*>(g_real_malloc));
     } else if (effective == Strategy::ThreadLocalFreeList) {
 #if defined(__linux__) && defined(__x86_64__)
