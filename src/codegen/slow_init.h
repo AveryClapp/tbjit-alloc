@@ -18,6 +18,13 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size);
 // rewind bump_ptr on a LIFO-matching free.
 uint8_t* paired_slow_init(uint32_t index, uint32_t size);
 
+// ProducerConsumer refill: called from both initial alloc and bump-exhaust
+// slow paths. If a prior segment exists in tl_bumps[slot], retires it
+// (drains its MPSC remote queue first; sets live_chunks to chunks-served
+// minus chunks-drained). Then mmaps a fresh ProducerConsumer-tagged
+// segment, installs it, and returns the first chunk.
+uint8_t* pc_refill(uint32_t index, uint32_t size);
+
 // Called from emitted FreeListAlloc refill path. mmaps a fresh region,
 // chops it into chunks of obj_size, links them into a free list installed
 // at tl_freelists[index], registers the region, and pops one chunk to

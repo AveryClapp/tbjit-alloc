@@ -33,19 +33,20 @@ void* compile(const RoutineSpec& spec) {
     // falls back to BumpAlloc — the alloc fast path is identical; the
     // LIFO-rewind free emitter and dual-site compile is future work.
     // MultiSizeFreeList has its own emitter below.
-    Strategy effective = spec.strategy;
-    if (effective == Strategy::ProducerConsumer)
-        effective = Strategy::ThreadLocalFreeList;
     // PairedStack keeps its own slow-init (segment tagged PairedStack so the
-    // free trampoline rewinds bump_ptr on a LIFO match). The alloc emitter
-    // is the bump emitter — fast path is identical to BumpAlloc.
+    // free trampoline rewinds bump_ptr on a LIFO match). ProducerConsumer
+    // uses a bump fast path + always-refill slow path. Both share the bump
+    // fast-path shape with BumpAlloc.
+    Strategy effective = spec.strategy;
     bool paired_alloc = (effective == Strategy::PairedStack);
-    if (effective == Strategy::PairedStack)
-        effective = Strategy::BumpAlloc;
+    bool pc_alloc     = (effective == Strategy::ProducerConsumer);
+    if (paired_alloc) effective = Strategy::BumpAlloc;
+    if (pc_alloc)     effective = Strategy::ProducerConsumer;  // keep distinct
     if (effective != Strategy::BumpAlloc &&
         effective != Strategy::ThreadLocalFreeList &&
         effective != Strategy::EpochArena &&
-        effective != Strategy::MultiSizeFreeList) return nullptr;
+        effective != Strategy::MultiSizeFreeList &&
+        effective != Strategy::ProducerConsumer) return nullptr;
     if (effective == Strategy::ThreadLocalFreeList && spec.size < sizeof(void*))
         return nullptr;
     if (effective == Strategy::MultiSizeFreeList) {
@@ -96,6 +97,25 @@ void* compile(const RoutineSpec& spec) {
             spec.size, spec.id,
             reinterpret_cast<void*>(tbjit::deopt::handle),
             reinterpret_cast<void*>(freelist_refill),
+            reinterpret_cast<void*>(g_real_malloc));
+    } else if (effective == Strategy::ProducerConsumer) {
+#if defined(__linux__) && defined(__x86_64__)
+        uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
+        uint32_t ptr_off = static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&tl_bumps[idx].ptr) - tp);
+        uint32_t end_off = static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&tl_bumps[idx].end) - tp);
+#else
+        uint32_t ptr_off = idx * static_cast<uint32_t>(sizeof(BumpSlot));
+        uint32_t end_off = ptr_off + static_cast<uint32_t>(sizeof(uint8_t*));
+#endif
+        n = emit_pc_alloc(
+            page, CODE_PAGE_SIZE,
+            ptr_off, end_off,
+            idx,
+            spec.size, spec.id,
+            reinterpret_cast<void*>(tbjit::deopt::handle),
+            reinterpret_cast<void*>(pc_refill),
             reinterpret_cast<void*>(g_real_malloc));
     } else if (effective == Strategy::MultiSizeFreeList) {
 #if defined(__linux__) && defined(__x86_64__)

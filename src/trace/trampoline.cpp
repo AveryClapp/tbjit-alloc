@@ -98,6 +98,17 @@ void free(void* ptr) {
                 case tbjit::Strategy::BumpAlloc:
                 case tbjit::Strategy::EpochArena:
                     break;  // chunks live until segment reclaim
+                case tbjit::Strategy::ProducerConsumer:
+                    // Active segment: foreign frees push to MPSC for the
+                    // refill path to drain on retire. Retired segment:
+                    // decrement live_chunks; reaper reclaims at zero.
+                    if (s->retired) {
+                        s->live_chunks.fetch_sub(
+                            1, std::memory_order_release);
+                    } else {
+                        tbjit::seg::mpsc_push(s, ptr);
+                    }
+                    break;
                 case tbjit::Strategy::PairedStack: {
                     // LIFO rewind: if the freed ptr is exactly bump_ptr -
                     // chunk_size, this was the most-recent alloc — rewind.

@@ -582,4 +582,117 @@ size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
     return static_cast<size_t>(p - buf);
 }
 
+//
+// ProducerConsumer routine layout: bump fast path + always-refill slow path.
+// Compared to BumpAlloc, the slow path drops the `cmp rax, 0; jne .deopt`
+// distinction — on exhaust we ALWAYS refill (which retires + mmaps).
+//
+//   cmp rdi, dominant_size       ; guard (same as bump)
+//   jne .deopt
+//   mov rax, fs:[tls_ptr_offset]
+//   lea rcx, [rax + dominant_size]
+//   cmp rcx, fs:[tls_end_offset]
+//   jae .refill
+//   mov fs:[tls_ptr_offset], rcx
+//   ret
+//
+// [.refill]
+//   mov edi, slot_index
+//   mov esi, dominant_size
+//   movabs rax, refill_fn
+//   call rax
+//   ret
+//
+// [.deopt]  (only fires on guard failure)
+//   push rdi; mov edi, call_site_id; movabs rsi, buf;
+//   movabs rax, deopt_handler; call rax; pop rdi;
+//   movabs rax, real_malloc; jmp rax
+//
+
+size_t emit_pc_alloc(uint8_t* buf, size_t buf_size,
+                     uint32_t tls_ptr_offset, uint32_t tls_end_offset,
+                     uint32_t slot_index,
+                     uint32_t dominant_size, uint32_t call_site_id,
+                     void* deopt_handler, void* refill_fn,
+                     void* real_malloc) {
+    if (!buf || buf_size < 200) return 0;
+
+    uint8_t* p = buf;
+
+    // cmp rdi, imm32
+    p = w8(p, 0x48); p = w8(p, 0x81); p = w8(p, 0xFF);
+    p = w32(p, dominant_size);
+
+    // jne .deopt (placeholder rel8)
+    p = w8(p, 0x75);
+    uint8_t* jne_deopt = p;
+    p = w8(p, 0x00);
+
+    // mov rax, fs:[tls_ptr_offset]
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x8B);
+    p = w8(p, 0x04); p = w8(p, 0x25);
+    p = w32(p, tls_ptr_offset);
+
+    // lea rcx, [rax + dominant_size]
+    if (dominant_size < 128) {
+        p = w8(p, 0x48); p = w8(p, 0x8D); p = w8(p, 0x48);
+        p = w8(p, static_cast<uint8_t>(dominant_size));
+    } else {
+        p = w8(p, 0x48); p = w8(p, 0x8D); p = w8(p, 0x88);
+        p = w32(p, dominant_size);
+    }
+
+    // cmp rcx, fs:[tls_end_offset]
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x3B);
+    p = w8(p, 0x0C); p = w8(p, 0x25);
+    p = w32(p, tls_end_offset);
+
+    // jae .refill (placeholder rel8)
+    p = w8(p, 0x73);
+    uint8_t* jae_refill = p;
+    p = w8(p, 0x00);
+
+    // mov fs:[tls_ptr_offset], rcx
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x89);
+    p = w8(p, 0x0C); p = w8(p, 0x25);
+    p = w32(p, tls_ptr_offset);
+
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .refill ---
+    uint8_t* refill_label = p;
+    *jae_refill = static_cast<uint8_t>(refill_label - (jae_refill + 1));
+
+    // mov edi, slot_index
+    p = w8(p, 0xBF); p = w32(p, slot_index);
+    // mov esi, dominant_size
+    p = w8(p, 0xBE); p = w32(p, dominant_size);
+    // movabs rax, refill_fn
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(refill_fn));
+    // call rax
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .deopt ---
+    uint8_t* deopt_label = p;
+    *jne_deopt = static_cast<uint8_t>(deopt_label - (jne_deopt + 1));
+
+    p = w8(p, 0x57);
+    p = w8(p, 0xBF); p = w32(p, call_site_id);
+    p = w8(p, 0x48); p = w8(p, 0xBE);
+    p = w64(p, reinterpret_cast<uint64_t>(buf));
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+    p = w8(p, 0x5F);
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(real_malloc));
+    p = w8(p, 0xFF); p = w8(p, 0xE0);
+
+    return static_cast<size_t>(p - buf);
+}
+
 } // namespace tbjit::codegen

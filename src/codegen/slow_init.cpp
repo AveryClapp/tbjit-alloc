@@ -16,6 +16,42 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
     return base;
 }
 
+uint8_t* pc_refill(uint32_t index, uint32_t size) {
+    // Retire any current segment for this slot.
+    if (tl_bumps[index].end) {
+        seg::SegmentHeader* active = seg::of(tl_bumps[index].end - 1);
+        if (seg::is_managed(active) &&
+            active->strategy == Strategy::ProducerConsumer) {
+            uint8_t* payload = seg::payload_start(active);
+            uint32_t served = static_cast<uint32_t>(
+                (active->bump_ptr - payload) / active->chunk_size);
+
+            // Drain MPSC: any chunk on the queue is already-freed by the
+            // consumer. Subtract them from the served count.
+            uint32_t drained = 0;
+            void* chain = seg::mpsc_harvest(active);
+            while (chain) {
+                ++drained;
+                chain = *static_cast<void**>(chain);
+            }
+            uint32_t outstanding =
+                (served > drained) ? (served - drained) : 0;
+            active->live_chunks.store(
+                outstanding, std::memory_order_release);
+            active->retired = true;
+        }
+    }
+
+    seg::SegmentHeader* s = seg::alloc_segment(
+        Strategy::ProducerConsumer, index, g_slot_to_site[index], size);
+    assert(s);
+    uint8_t* base = seg::payload_start(s);
+    tl_bumps[index].ptr = base + size;
+    tl_bumps[index].end = seg::segment_end(s);
+    s->bump_ptr  = base + size;
+    return base;
+}
+
 uint8_t* paired_slow_init(uint32_t index, uint32_t size) {
     seg::SegmentHeader* s = seg::alloc_segment(
         Strategy::PairedStack, index, g_slot_to_site[index], size);

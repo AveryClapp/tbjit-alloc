@@ -56,4 +56,15 @@ size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
                                  void* deopt_handler, void* refill_fn,
                                  void* real_malloc);
 
+// Emits a ProducerConsumer routine: bump fast path (identical to BumpAlloc)
+// but the slow path always calls refill_fn — no init/exhaust distinction.
+// refill_fn (pc_refill) retires the current segment and mmaps a fresh one,
+// so the producer never deopts on exhaust; only on a guard failure.
+size_t emit_pc_alloc(uint8_t* buf, size_t buf_size,
+                     uint32_t tls_ptr_offset, uint32_t tls_end_offset,
+                     uint32_t slot_index,
+                     uint32_t dominant_size, uint32_t call_site_id,
+                     void* deopt_handler, void* refill_fn,
+                     void* real_malloc);
+
 } // namespace tbjit::codegen
