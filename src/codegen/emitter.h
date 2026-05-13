@@ -40,4 +40,20 @@ size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
                         void* deopt_handler, void* reset_alloc_fn,
                         void* real_malloc);
 
+// Emits a MultiSizeFreeList routine: a per-site branch ladder over up to 4
+// learned size classes. For each class i, generates a `cmp rdi, class_sizes[i]
+// / je .class_i_path` test; falls through to .deopt if no class matches.
+// Each class path is a TLFreeList-style pop from heads[i], with a per-class
+// refill call on empty. tls_heads_base_offset is the fs-relative offset of
+// tl_multi_freelists[slot].heads[0]; heads[i] is at base + i*8.
+// refill_fn signature: void* multi_refill(uint32_t slot, uint32_t size,
+//                                        uint32_t class_idx).
+size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
+                                 uint32_t tls_heads_base_offset,
+                                 uint32_t slot_index,
+                                 const uint32_t* class_sizes, size_t class_count,
+                                 uint32_t call_site_id,
+                                 void* deopt_handler, void* refill_fn,
+                                 void* real_malloc);
+
 } // namespace tbjit::codegen

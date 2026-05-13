@@ -141,8 +141,15 @@ void advance_prespec(CallSiteSummary* s) {
             }
             s->phase = Phase::Compiled;
             {
-                codegen::RoutineSpec spec{s->id, s->candidate,
-                    s->windows[s->active].hist.dominant_size()};
+                codegen::RoutineSpec spec{};
+                spec.id       = s->id;
+                spec.strategy = s->candidate;
+                spec.size     = s->windows[s->active].hist.dominant_size();
+                if (s->candidate == Strategy::MultiSizeFreeList) {
+                    spec.class_count = s->class_count;
+                    for (uint8_t i = 0; i < s->class_count; ++i)
+                        spec.class_sizes[i] = s->classes[i].size;
+                }
                 void* routine = codegen::compile(spec);
                 if (routine) {
                     dispatch::install(s->id,

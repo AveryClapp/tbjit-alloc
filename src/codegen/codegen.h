@@ -7,7 +7,9 @@ namespace tbjit::codegen {
 struct RoutineSpec {
     CallSiteID id;
     Strategy   strategy;
-    uint32_t   size;        // dominant allocation size (BumpAlloc/PairedStack)
+    uint32_t   size;        // dominant size (BumpAlloc / PairedStack / class 0)
+    uint32_t   class_sizes[4];  // MultiSizeFreeList: per-class sizes
+    uint8_t    class_count;     // 0 for non-multi; 1..4 for multi
 };
 
 // Returns a pointer to the emitted routine, or nullptr on failure.

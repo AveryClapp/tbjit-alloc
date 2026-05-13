@@ -26,6 +26,15 @@ struct FreeListSlot {
                                         // MPSC remote-free queues on refill
 };
 
+constexpr size_t MULTI_MAX_CLASSES = 4;
+
+// Per-class state for MultiSizeFreeList. Each class has its own free-list
+// head and its own intrusive segs chain (so refill is per-class).
+struct MultiFreeListSlot {
+    void*                       heads[MULTI_MAX_CLASSES];
+    tbjit::seg::SegmentHeader*  segs[MULTI_MAX_CLASSES];
+};
+
 struct ArenaSlot {
     uint8_t* ptr;   // current bump position (null = uninitialized)
     uint8_t* end;   // end of region
@@ -33,9 +42,10 @@ struct ArenaSlot {
 };
 
 // Each thread owns one tl_bumps array; index is baked into emitted code.
-extern thread_local BumpSlot     tl_bumps[MAX_COMPILED_SITES];
-extern thread_local FreeListSlot tl_freelists[MAX_COMPILED_SITES];
-extern thread_local ArenaSlot    tl_arenas[MAX_COMPILED_SITES];
+extern thread_local BumpSlot          tl_bumps[MAX_COMPILED_SITES];
+extern thread_local FreeListSlot      tl_freelists[MAX_COMPILED_SITES];
+extern thread_local ArenaSlot         tl_arenas[MAX_COMPILED_SITES];
+extern thread_local MultiFreeListSlot tl_multi_freelists[MAX_COMPILED_SITES];
 
 // Atomically assigns the next available slot index for a newly compiled site.
 // Returns MAX_COMPILED_SITES on overflow (compile() should return nullptr).

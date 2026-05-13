@@ -99,20 +99,32 @@ void free(void* ptr) {
                 case tbjit::Strategy::EpochArena:
                     break;  // chunks live until segment reclaim
                 case tbjit::Strategy::ThreadLocalFreeList: {
-                    // Retired segments: drop the chunk and decrement the
-                    // outstanding counter. When it hits 0 the reaper munmaps.
                     if (s->retired) {
                         s->live_chunks.fetch_sub(
                             1, std::memory_order_release);
                         break;
                     }
-                    // Active segment: owner pushes onto local list; foreign
-                    // thread CAS-pushes onto the MPSC remote queue.
                     uint32_t my_tid = tbjit::seg::current_tid();
                     if (s->owner_tid == my_tid) {
                         *static_cast<void**>(ptr) =
                             tbjit::codegen::tl_freelists[s->slot_index].head;
                         tbjit::codegen::tl_freelists[s->slot_index].head = ptr;
+                    } else {
+                        tbjit::seg::mpsc_push(s, ptr);
+                    }
+                    break;
+                }
+                case tbjit::Strategy::MultiSizeFreeList: {
+                    if (s->retired) {
+                        s->live_chunks.fetch_sub(
+                            1, std::memory_order_release);
+                        break;
+                    }
+                    uint32_t my_tid = tbjit::seg::current_tid();
+                    if (s->owner_tid == my_tid) {
+                        auto& m = tbjit::codegen::tl_multi_freelists[s->slot_index];
+                        *static_cast<void**>(ptr) = m.heads[s->class_idx];
+                        m.heads[s->class_idx] = ptr;
                     } else {
                         tbjit::seg::mpsc_push(s, ptr);
                     }

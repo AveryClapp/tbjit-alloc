@@ -29,25 +29,26 @@ void make_executable(void* page) {
 
 void* compile(const RoutineSpec& spec) {
     if (spec.size == 0 || spec.size >= tbjit::analysis::ExactHistogram::MAX_SIZE) return nullptr;
-    // ProducerConsumer reuses the TLFreeList codegen path: the Phase 2
-    // MPSC routing already separates producer allocs from consumer frees.
-    // MultiSizeFreeList likewise falls back to TLFreeList on the dominant
-    // size — the per-site branch ladder over learned classes is future
-    // work. PairedStack falls back to BumpAlloc — the alloc fast path is
-    // identical; the LIFO-rewind free emitter and dual-site compile is
-    // future work (see analysis::CallSiteSummary::top_pair).
+    // ProducerConsumer reuses the TLFreeList codegen path. PairedStack
+    // falls back to BumpAlloc — the alloc fast path is identical; the
+    // LIFO-rewind free emitter and dual-site compile is future work.
+    // MultiSizeFreeList has its own emitter below.
     Strategy effective = spec.strategy;
-    if (effective == Strategy::ProducerConsumer ||
-        effective == Strategy::MultiSizeFreeList)
+    if (effective == Strategy::ProducerConsumer)
         effective = Strategy::ThreadLocalFreeList;
     if (effective == Strategy::PairedStack)
         effective = Strategy::BumpAlloc;
     if (effective != Strategy::BumpAlloc &&
         effective != Strategy::ThreadLocalFreeList &&
-        effective != Strategy::EpochArena) return nullptr;
-    // Free-list chunks need to fit a `next` pointer in their first 8 bytes.
+        effective != Strategy::EpochArena &&
+        effective != Strategy::MultiSizeFreeList) return nullptr;
     if (effective == Strategy::ThreadLocalFreeList && spec.size < sizeof(void*))
         return nullptr;
+    if (effective == Strategy::MultiSizeFreeList) {
+        if (spec.class_count == 0 || spec.class_count > 4) return nullptr;
+        for (uint8_t i = 0; i < spec.class_count; ++i)
+            if (spec.class_sizes[i] < sizeof(void*)) return nullptr;
+    }
 
     uint32_t idx = alloc_slot_index();
     if (idx >= static_cast<uint32_t>(MAX_COMPILED_SITES)) return nullptr;
@@ -90,6 +91,23 @@ void* compile(const RoutineSpec& spec) {
             spec.size, spec.id,
             reinterpret_cast<void*>(tbjit::deopt::handle),
             reinterpret_cast<void*>(freelist_refill),
+            reinterpret_cast<void*>(g_real_malloc));
+    } else if (effective == Strategy::MultiSizeFreeList) {
+#if defined(__linux__) && defined(__x86_64__)
+        uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
+        uint32_t heads_off = static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&tl_multi_freelists[idx].heads[0]) - tp);
+#else
+        uint32_t heads_off = idx * static_cast<uint32_t>(sizeof(MultiFreeListSlot));
+#endif
+        n = emit_multi_freelist_alloc(
+            page, CODE_PAGE_SIZE,
+            heads_off,
+            idx,
+            spec.class_sizes, spec.class_count,
+            spec.id,
+            reinterpret_cast<void*>(tbjit::deopt::handle),
+            reinterpret_cast<void*>(multi_refill),
             reinterpret_cast<void*>(g_real_malloc));
     } else { // EpochArena
 #if defined(__linux__) && defined(__x86_64__)

@@ -59,6 +59,46 @@ void* freelist_refill(uint32_t index, uint32_t obj_size) {
     return chunk;
 }
 
+void* multi_refill(uint32_t slot, uint32_t obj_size, uint32_t class_idx) {
+    assert(obj_size >= sizeof(void*));
+    assert(class_idx < MULTI_MAX_CLASSES);
+
+    MultiFreeListSlot& m = tl_multi_freelists[slot];
+
+    // Harvest active segment's MPSC queue for this class, retire on miss.
+    seg::SegmentHeader* active = m.segs[class_idx];
+    if (active) {
+        void* harvested = seg::mpsc_harvest(active);
+        if (harvested) {
+            void* chunk = harvested;
+            m.heads[class_idx] = *static_cast<void**>(harvested);
+            return chunk;
+        }
+        active->live_chunks.store(
+            seg::chunks_in_segment(active), std::memory_order_release);
+        active->retired = true;
+    }
+
+    seg::SegmentHeader* s = seg::alloc_segment(
+        Strategy::MultiSizeFreeList, slot,
+        g_slot_to_site[slot], obj_size);
+    assert(s);
+    s->class_idx = static_cast<uint8_t>(class_idx);
+    s->next_in_site = m.segs[class_idx];
+    m.segs[class_idx] = s;
+
+    uint8_t* base = seg::payload_start(s);
+    uint8_t* end  = seg::segment_end(s);
+    void* head = nullptr;
+    for (uint8_t* p = base; p + obj_size <= end; p += obj_size) {
+        *reinterpret_cast<void**>(p) = head;
+        head = p;
+    }
+    void* chunk = head;
+    m.heads[class_idx] = *reinterpret_cast<void**>(head);
+    return chunk;
+}
+
 uint8_t* arena_slow_init(uint32_t index, uint32_t size) {
     seg::SegmentHeader* s = seg::alloc_segment(
         Strategy::EpochArena, index, /*site=*/g_slot_to_site[index], size);

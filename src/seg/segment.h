@@ -12,7 +12,8 @@ constexpr uintptr_t SEGMENT_MASK = ~(static_cast<uintptr_t>(SEGMENT_SIZE) - 1);
 struct alignas(64) SegmentHeader {
     Strategy              strategy;
     bool                  retired;        // true after a fresh active replaces it
-    uint8_t               _pad0[2];
+    uint8_t               class_idx;      // MultiSizeFreeList: which class (0..3)
+    uint8_t               _pad0;
     uint32_t              slot_index;
     CallSiteID            alloc_site;
     uint32_t              owner_tid;

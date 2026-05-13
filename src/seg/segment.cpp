@@ -76,6 +76,7 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     auto* h = static_cast<SegmentHeader*>(mem);
     h->strategy     = s;
     h->retired      = false;
+    h->class_idx    = 0;
     h->slot_index   = slot;
     h->alloc_site   = site;
     h->owner_tid    = current_tid();

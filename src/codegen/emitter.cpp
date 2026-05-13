@@ -461,4 +461,125 @@ size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
     return static_cast<size_t>(p - buf);
 }
 
+//
+// MultiSizeFreeList routine layout (up to 4 classes):
+//
+//   cmp rdi, class_sizes[0]
+//   jne .skip_0
+//   ;; class 0 pop:
+//     mov rax, fs:[heads+0]; test rax,rax; jz .refill_0
+//     mov rcx,[rax]; mov fs:[heads+0], rcx; ret
+//   .refill_0:
+//     mov edi, slot; mov esi, class_sizes[0]; mov edx, 0
+//     movabs rax, refill_fn; call rax; ret
+//   .skip_0:
+//   cmp rdi, class_sizes[1]   ; (and so on for each class)
+//   ...
+//   .skip_{K-1}:                ; fall through to deopt
+//   .deopt:                     ; standard wrong-size deopt + tail-call malloc
+//
+// Each class body is ~64 bytes; jne / jz displacements stay within rel8.
+//
+
+size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
+                                 uint32_t tls_heads_base_offset,
+                                 uint32_t slot_index,
+                                 const uint32_t* class_sizes, size_t class_count,
+                                 uint32_t call_site_id,
+                                 void* deopt_handler, void* refill_fn,
+                                 void* real_malloc) {
+    if (!buf || buf_size < 512) return 0;
+    if (class_count == 0 || class_count > 4) return 0;
+
+    uint8_t* p = buf;
+
+    for (size_t i = 0; i < class_count; ++i) {
+        uint32_t head_off = tls_heads_base_offset +
+                            static_cast<uint32_t>(i * sizeof(void*));
+
+        // cmp rdi, class_sizes[i]
+        p = w8(p, 0x48); p = w8(p, 0x81); p = w8(p, 0xFF);
+        p = w32(p, class_sizes[i]);
+
+        // jne .skip_i (rel8 placeholder)
+        p = w8(p, 0x75);
+        uint8_t* jne_skip = p;
+        p = w8(p, 0x00);
+
+        // --- class i fast path ---
+
+        // mov rax, fs:[heads + i*8]
+        p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x8B);
+        p = w8(p, 0x04); p = w8(p, 0x25);
+        p = w32(p, head_off);
+
+        // test rax, rax
+        p = w8(p, 0x48); p = w8(p, 0x85); p = w8(p, 0xC0);
+
+        // jz .refill_i (rel8 placeholder)
+        p = w8(p, 0x74);
+        uint8_t* jz_refill = p;
+        p = w8(p, 0x00);
+
+        // mov rcx, [rax]
+        p = w8(p, 0x48); p = w8(p, 0x8B); p = w8(p, 0x08);
+
+        // mov fs:[heads + i*8], rcx
+        p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x89);
+        p = w8(p, 0x0C); p = w8(p, 0x25);
+        p = w32(p, head_off);
+
+        // ret
+        p = w8(p, 0xC3);
+
+        // --- .refill_i ---
+        uint8_t* refill_label = p;
+        *jz_refill = static_cast<uint8_t>(refill_label - (jz_refill + 1));
+
+        // mov edi, slot_index
+        p = w8(p, 0xBF); p = w32(p, slot_index);
+        // mov esi, class_sizes[i]
+        p = w8(p, 0xBE); p = w32(p, class_sizes[i]);
+        // mov edx, i  (class index, third arg)
+        p = w8(p, 0xBA); p = w32(p, static_cast<uint32_t>(i));
+        // movabs rax, refill_fn
+        p = w8(p, 0x48); p = w8(p, 0xB8);
+        p = w64(p, reinterpret_cast<uint64_t>(refill_fn));
+        // call rax
+        p = w8(p, 0xFF); p = w8(p, 0xD0);
+        // ret
+        p = w8(p, 0xC3);
+
+        // .skip_i — next iteration's cmp lands here
+        uint8_t* skip_label = p;
+        intptr_t disp = skip_label - (jne_skip + 1);
+        if (disp < -128 || disp > 127) return 0;  // grew beyond rel8 budget
+        *jne_skip = static_cast<uint8_t>(disp);
+    }
+
+    // --- .deopt --- (fall through after all classes mismatched)
+
+    // push rdi
+    p = w8(p, 0x57);
+    // mov edi, call_site_id
+    p = w8(p, 0xBF); p = w32(p, call_site_id);
+    // movabs rsi, buf
+    p = w8(p, 0x48); p = w8(p, 0xBE);
+    p = w64(p, reinterpret_cast<uint64_t>(buf));
+    // movabs rax, deopt_handler
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
+    // call rax
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+    // pop rdi
+    p = w8(p, 0x5F);
+    // movabs rax, real_malloc
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(real_malloc));
+    // jmp rax
+    p = w8(p, 0xFF); p = w8(p, 0xE0);
+
+    return static_cast<size_t>(p - buf);
+}
+
 } // namespace tbjit::codegen

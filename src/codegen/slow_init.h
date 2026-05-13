@@ -19,6 +19,12 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size);
 // return to the caller.
 void* freelist_refill(uint32_t index, uint32_t obj_size);
 
+// Multi-class refill: like freelist_refill but for class `class_idx` of
+// tl_multi_freelists[slot]. Allocates a segment dedicated to this class,
+// chops into obj_size chunks, installs head at tl_multi_freelists[slot]
+// .heads[class_idx], and returns one chunk.
+void* multi_refill(uint32_t slot, uint32_t obj_size, uint32_t class_idx);
+
 // First-time init for an EpochArena slot: mmaps a region, installs
 // {base, end, base+size} into tl_arenas[index], registers the region,
 // and returns the first allocation pointer.
