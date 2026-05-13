@@ -32,22 +32,4 @@ uint8_t* arena_slow_init(uint32_t index, uint32_t size);
 // user is responsible for not retaining them across resets).
 uint8_t* arena_reset_alloc(uint32_t index, uint32_t size);
 
-// Region kinds reported by find_region.
-enum class RegionKind : uint8_t { Bump, FreeList };
-
-struct RegionInfo {
-    RegionKind kind;
-    uint32_t   slot_index;   // valid only for FreeList
-};
-
-// True if ptr lies inside any registered region. When non-null, *info_out
-// receives the kind + (for free lists) the slot index, so the free
-// interceptor can dispatch to tl_freelists[slot].
-bool find_region(const void* ptr, RegionInfo* info_out);
-
-// Convenience: legacy "is this a bump region" predicate used by the
-// existing free interceptor before the generalized registry landed.
-// Retained so callers don't all need to update at once.
-bool is_in_bump_region(const void* ptr);
-
 } // namespace tbjit::codegen

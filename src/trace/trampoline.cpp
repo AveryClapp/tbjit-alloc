@@ -4,7 +4,6 @@
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
-#include "codegen/slow_init.h"
 #include "codegen/tls.h"
 #include "seg/segment.h"
 #include "common.h"
@@ -92,17 +91,13 @@ void free(void* ptr) {
     tbjit::trace::record_free(id, ptr);
     tbjit::shadow::validate_free(id, ptr);
 
-    // Dispatch by segment strategy when ptr lands in a managed segment;
-    // fall back to the legacy region registry for strategies that haven't
-    // migrated to segments yet (Phase 0.3+ retires the legacy path).
     if (ptr) {
         tbjit::seg::SegmentHeader* s = tbjit::seg::of(ptr);
         if (tbjit::seg::is_managed(s)) {
             switch (s->strategy) {
                 case tbjit::Strategy::BumpAlloc:
                 case tbjit::Strategy::EpochArena:
-                    // No individual free; chunks live until segment reclaim.
-                    break;
+                    break;  // chunks live until segment reclaim
                 case tbjit::Strategy::ThreadLocalFreeList:
                     *static_cast<void**>(ptr) =
                         tbjit::codegen::tl_freelists[s->slot_index].head;
@@ -111,16 +106,7 @@ void free(void* ptr) {
                 default: break;
             }
         } else {
-            tbjit::codegen::RegionInfo info{};
-            if (tbjit::codegen::find_region(ptr, &info)) {
-                if (info.kind == tbjit::codegen::RegionKind::FreeList) {
-                    *static_cast<void**>(ptr) =
-                        tbjit::codegen::tl_freelists[info.slot_index].head;
-                    tbjit::codegen::tl_freelists[info.slot_index].head = ptr;
-                }
-            } else {
-                real_free(ptr);
-            }
+            real_free(ptr);
         }
     }
 
