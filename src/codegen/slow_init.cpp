@@ -1,5 +1,6 @@
 #include "slow_init.h"
 #include "tls.h"
+#include "seg/segment.h"
 #include <sys/mman.h>
 #include <cassert>
 #include <atomic>
@@ -39,15 +40,13 @@ void register_region(uint8_t* base, uint8_t* end,
 } // namespace
 
 uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
-    void* mem = mmap(nullptr, BUMP_REGION_SIZE,
-                     PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(mem != MAP_FAILED);
-
-    uint8_t* base = static_cast<uint8_t*>(mem);
+    seg::SegmentHeader* s = seg::alloc_segment(
+        Strategy::BumpAlloc, index, /*site=*/0, size);
+    assert(s);
+    uint8_t* base = seg::payload_start(s);
     tl_bumps[index].ptr = base + size;
-    tl_bumps[index].end = base + BUMP_REGION_SIZE;
-    register_region(base, base + BUMP_REGION_SIZE, RegionKind::Bump, 0);
+    tl_bumps[index].end = seg::segment_end(s);
+    s->bump_ptr  = base + size;
     return base;
 }
 
