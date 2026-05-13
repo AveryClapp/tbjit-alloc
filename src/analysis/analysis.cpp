@@ -30,6 +30,8 @@ constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, sto
 constexpr double   LIFETIME_REAP_RATIO   = 0.50;  // free_count/event_count >= → Reap
 constexpr double   LIFETIME_HOLD_RATIO   = 0.10;  // free_count/event_count <  → Hold
 constexpr double   PC_TID_CONCENTRATION  = 0.95;  // top_count/total >= → concentrated
+constexpr double   MULTI_CLASS_COVERAGE  = 0.90;  // top-K modes must cover this fraction
+constexpr size_t   MULTI_CLASS_MAX       = 4;     // max classes to learn per site
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -101,6 +103,15 @@ void advance_prespec(CallSiteSummary* s) {
                 concentrated(s->free_dist) &&
                 s->alloc_dist.top_tid != s->free_dist.top_tid;
 
+            // Learn top-K size classes; used by MultiSizeFreeList and
+            // recorded for diagnostics/paper figures regardless of strategy.
+            ExactHistogram::Mode modes[MULTI_CLASS_MAX];
+            size_t nclass = s->windows[s->active].hist.top_k_modes(
+                modes, MULTI_CLASS_MAX, MULTI_CLASS_COVERAGE);
+            s->class_count = static_cast<uint8_t>(nclass);
+            for (size_t i = 0; i < nclass; ++i)
+                s->classes[i] = {modes[i].size, modes[i].count};
+
             Strategy forced = strategy_override();
             if (forced != Strategy::Generic) {
                 s->candidate = forced;
@@ -108,6 +119,8 @@ void advance_prespec(CallSiteSummary* s) {
                 s->candidate = Strategy::ProducerConsumer;
             } else if (s->windows[s->active].hist.is_monomorphic(0.95)) {
                 s->candidate = Strategy::BumpAlloc;
+            } else if (nclass >= 2) {
+                s->candidate = Strategy::MultiSizeFreeList;
             } else {
                 s->candidate = Strategy::ThreadLocalFreeList;
             }

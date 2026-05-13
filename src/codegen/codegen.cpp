@@ -29,12 +29,14 @@ void make_executable(void* page) {
 
 void* compile(const RoutineSpec& spec) {
     if (spec.size == 0 || spec.size >= tbjit::analysis::ExactHistogram::MAX_SIZE) return nullptr;
-    // ProducerConsumer reuses the TLFreeList codegen path for now; the
-    // existing Phase 2 MPSC routing already separates producer-thread allocs
-    // from consumer-thread frees. A differentiated bump-style producer path
-    // is future work.
+    // ProducerConsumer reuses the TLFreeList codegen path: the Phase 2
+    // MPSC routing already separates producer allocs from consumer frees.
+    // MultiSizeFreeList likewise falls back to TLFreeList on the dominant
+    // size — the per-site branch ladder over learned classes is future
+    // work (see analysis::CallSiteSummary::classes for the learned set).
     Strategy effective = spec.strategy;
-    if (effective == Strategy::ProducerConsumer)
+    if (effective == Strategy::ProducerConsumer ||
+        effective == Strategy::MultiSizeFreeList)
         effective = Strategy::ThreadLocalFreeList;
     if (effective != Strategy::BumpAlloc &&
         effective != Strategy::ThreadLocalFreeList &&

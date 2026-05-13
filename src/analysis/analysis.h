@@ -45,6 +45,11 @@ struct ThreadDist {
     }
 };
 
+struct SizeClass {
+    uint32_t size{0};
+    uint32_t count{0};
+};
+
 struct CallSiteSummary {
     CallSiteID  id{0};
     Phase       phase{Phase::PreSpec};
@@ -60,6 +65,9 @@ struct CallSiteSummary {
 
     SizeWindow  windows[2];
     uint8_t     active{0};
+
+    SizeClass   classes[4];       // learned classes at specialization time
+    uint8_t     class_count{0};
 
     ExactHistogram baseline;  // frozen at specialization time
     SizeWindow     post_window;

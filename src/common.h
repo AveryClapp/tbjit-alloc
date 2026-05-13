@@ -22,6 +22,7 @@ enum class Strategy : uint8_t {
     EpochArena          = 3,
     PairedStack         = 4,
     ProducerConsumer    = 5,
+    MultiSizeFreeList   = 6,
 };
 
 struct AllocEvent {

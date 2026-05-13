@@ -45,6 +45,33 @@ struct ExactHistogram {
         return counts[dom] >= static_cast<uint64_t>(fraction * static_cast<double>(total));
     }
 
+    struct Mode { uint32_t size; uint32_t count; };
+
+    // Fills out[] with the highest-count sizes (in descending order) until
+    // either k modes are written or the cumulative count exceeds
+    // coverage_target * total. Returns the number written.
+    size_t top_k_modes(Mode out[], size_t k, double coverage_target) const {
+        if (total == 0 || k == 0) return 0;
+        size_t written = 0;
+        uint64_t cum = 0;
+        uint64_t target = static_cast<uint64_t>(coverage_target * static_cast<double>(total));
+        // Build a working copy of counts to mask out picked modes. 4096
+        // entries is small enough to scan k times.
+        uint32_t local[MAX_SIZE];
+        memcpy(local, counts, sizeof(local));
+        while (written < k) {
+            uint32_t best = 0;
+            for (uint32_t i = 1; i < MAX_SIZE; ++i)
+                if (local[i] > local[best]) best = i;
+            if (local[best] == 0) break;
+            out[written++] = {best, local[best]};
+            cum += local[best];
+            local[best] = 0;
+            if (cum >= target) break;
+        }
+        return written;
+    }
+
     void reset() {
         memset(counts, 0, sizeof(counts));
         total = 0;
