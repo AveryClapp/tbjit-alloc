@@ -4,16 +4,36 @@
 
 namespace tbjit::codegen {
 
-constexpr size_t BUMP_REGION_SIZE = 256 * 1024;
+constexpr size_t BUMP_REGION_SIZE     = 256 * 1024;
+constexpr size_t FREELIST_REGION_SIZE = 256 * 1024;
 
-// Called from emitted slow path. mmaps a fresh region, installs it into
-// tl_bumps[index], and returns the first allocation pointer.
-// size is the requested allocation size (already guard-checked to be correct).
+// Called from emitted BumpAlloc slow path. mmaps a fresh region, installs
+// it into tl_bumps[index], registers the region for free-path lookup, and
+// returns the first allocation pointer.
 uint8_t* bump_slow_init(uint32_t index, uint32_t size);
 
-// True if ptr lies inside any registered bump region. Used by the free
-// interceptor to skip glibc free() for JIT-served pointers (those pointers
-// were carved out of an mmap'd region and would crash glibc's allocator).
+// Called from emitted FreeListAlloc refill path. mmaps a fresh region,
+// chops it into chunks of obj_size, links them into a free list installed
+// at tl_freelists[index], registers the region, and pops one chunk to
+// return to the caller.
+void* freelist_refill(uint32_t index, uint32_t obj_size);
+
+// Region kinds reported by find_region.
+enum class RegionKind : uint8_t { Bump, FreeList };
+
+struct RegionInfo {
+    RegionKind kind;
+    uint32_t   slot_index;   // valid only for FreeList
+};
+
+// True if ptr lies inside any registered region. When non-null, *info_out
+// receives the kind + (for free lists) the slot index, so the free
+// interceptor can dispatch to tl_freelists[slot].
+bool find_region(const void* ptr, RegionInfo* info_out);
+
+// Convenience: legacy "is this a bump region" predicate used by the
+// existing free interceptor before the generalized registry landed.
+// Retained so callers don't all need to update at once.
 bool is_in_bump_region(const void* ptr);
 
 } // namespace tbjit::codegen

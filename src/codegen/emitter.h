@@ -16,4 +16,16 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
                        void* deopt_handler, void* slow_init_fn,
                        void* real_malloc);
 
+// Emits the FreeListAlloc routine into buf. Returns bytes written, or 0
+// on error. buf must be at least 200 bytes.
+// Calling convention: rdi = requested size, returns ptr in rax.
+// tls_head_offset: fs-relative byte offset of tl_freelists[slot].head.
+// slot_index: passed as arg0 to refill_fn when head is null.
+size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
+                           uint32_t tls_head_offset,
+                           uint32_t slot_index,
+                           uint32_t dominant_size, uint32_t call_site_id,
+                           void* deopt_handler, void* refill_fn,
+                           void* real_malloc);
+
 } // namespace tbjit::codegen

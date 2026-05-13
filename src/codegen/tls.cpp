@@ -3,7 +3,8 @@
 
 namespace tbjit::codegen {
 
-thread_local BumpSlot tl_bumps[MAX_COMPILED_SITES];
+thread_local BumpSlot     tl_bumps[MAX_COMPILED_SITES];
+thread_local FreeListSlot tl_freelists[MAX_COMPILED_SITES];
 
 static std::atomic<uint32_t> g_next_index{0};
 

@@ -11,8 +11,13 @@ struct BumpSlot {
     uint8_t* end;   // end of region
 };
 
+struct FreeListSlot {
+    void* head;     // head of singly-linked free list; null = empty/uninitialized
+};
+
 // Each thread owns one tl_bumps array; index is baked into emitted code.
-extern thread_local BumpSlot tl_bumps[MAX_COMPILED_SITES];
+extern thread_local BumpSlot     tl_bumps[MAX_COMPILED_SITES];
+extern thread_local FreeListSlot tl_freelists[MAX_COMPILED_SITES];
 
 // Atomically assigns the next available slot index for a newly compiled site.
 // Returns MAX_COMPILED_SITES on overflow (compile() should return nullptr).

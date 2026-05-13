@@ -203,4 +203,139 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
     return static_cast<size_t>(p - buf);
 }
 
+//
+// FreeListAlloc routine layout:
+//
+// [fast path]
+//   cmp rdi, dominant_size       ; guard
+//   jne .deopt                   ; (rel8, patched later)
+//   mov rax, fs:[tls_head_offset]; load head of free list
+//   test rax, rax
+//   jz   .refill                 ; (rel8, patched later)
+//   mov rcx, [rax]               ; next = *head
+//   mov fs:[tls_head_offset], rcx; head = next
+//   ret
+//
+// [.refill]  <-- jz patches here
+//   mov edi, slot_index
+//   mov esi, dominant_size
+//   movabs rax, refill_fn
+//   call rax                     ; returns popped chunk in rax
+//   ret
+//
+// [.deopt]  <-- jne patches here  (same as BumpAlloc)
+//   push rdi
+//   mov edi, call_site_id
+//   movabs rsi, buf
+//   movabs rax, deopt_handler
+//   call rax
+//   pop rdi
+//   movabs rax, real_malloc
+//   jmp rax
+//
+
+size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
+                           uint32_t tls_head_offset,
+                           uint32_t slot_index,
+                           uint32_t dominant_size, uint32_t call_site_id,
+                           void* deopt_handler, void* refill_fn,
+                           void* real_malloc) {
+    if (!buf || buf_size < 200) return 0;
+
+    uint8_t* p = buf;
+
+    // --- fast path ---
+
+    // cmp rdi, imm32  (REX.W + 81 /7 + imm32)
+    p = w8(p, 0x48); p = w8(p, 0x81); p = w8(p, 0xFF);
+    p = w32(p, dominant_size);
+
+    // jne .deopt (placeholder rel8)
+    p = w8(p, 0x75);
+    uint8_t* jne_deopt_off = p;
+    p = w8(p, 0x00);
+
+    // mov rax, QWORD PTR fs:[tls_head_offset]
+    //   64 48 8B 04 25 <imm32>
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x8B);
+    p = w8(p, 0x04); p = w8(p, 0x25);
+    p = w32(p, tls_head_offset);
+
+    // test rax, rax  (48 85 C0)
+    p = w8(p, 0x48); p = w8(p, 0x85); p = w8(p, 0xC0);
+
+    // jz .refill (placeholder rel8)
+    p = w8(p, 0x74);
+    uint8_t* jz_refill_off = p;
+    p = w8(p, 0x00);
+
+    // mov rcx, QWORD PTR [rax]  (48 8B 08)
+    p = w8(p, 0x48); p = w8(p, 0x8B); p = w8(p, 0x08);
+
+    // mov QWORD PTR fs:[tls_head_offset], rcx
+    //   64 48 89 0C 25 <imm32>
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x89);
+    p = w8(p, 0x0C); p = w8(p, 0x25);
+    p = w32(p, tls_head_offset);
+
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .refill label ---
+    uint8_t* refill_label = p;
+    *jz_refill_off = static_cast<uint8_t>(refill_label - (jz_refill_off + 1));
+
+    // mov edi, slot_index  (BF <imm32>)
+    p = w8(p, 0xBF);
+    p = w32(p, slot_index);
+
+    // mov esi, dominant_size  (BE <imm32>)
+    p = w8(p, 0xBE);
+    p = w32(p, dominant_size);
+
+    // movabs rax, refill_fn  (48 B8 <imm64>)
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(refill_fn));
+
+    // call rax (FF D0)
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .deopt label ---
+    uint8_t* deopt_label = p;
+    *jne_deopt_off = static_cast<uint8_t>(deopt_label - (jne_deopt_off + 1));
+
+    // push rdi (57)
+    p = w8(p, 0x57);
+
+    // mov edi, call_site_id (BF <imm32>)
+    p = w8(p, 0xBF);
+    p = w32(p, call_site_id);
+
+    // movabs rsi, buf (48 BE <imm64>)
+    p = w8(p, 0x48); p = w8(p, 0xBE);
+    p = w64(p, reinterpret_cast<uint64_t>(buf));
+
+    // movabs rax, deopt_handler (48 B8 <imm64>)
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
+
+    // call rax (FF D0)
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+
+    // pop rdi (5F)
+    p = w8(p, 0x5F);
+
+    // movabs rax, real_malloc (48 B8 <imm64>)
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(real_malloc));
+
+    // jmp rax (FF E0)
+    p = w8(p, 0xFF); p = w8(p, 0xE0);
+
+    return static_cast<size_t>(p - buf);
+}
+
 } // namespace tbjit::codegen

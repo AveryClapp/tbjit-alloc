@@ -5,6 +5,7 @@
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
 #include "codegen/slow_init.h"
+#include "codegen/tls.h"
 #include "common.h"
 #include <atomic>
 #include <cstdlib>
@@ -89,10 +90,20 @@ void free(void* ptr) {
     tbjit::CallSiteID id = tbjit::hash_return_addr(ra);
     tbjit::trace::record_free(id, ptr);
     tbjit::shadow::validate_free(id, ptr);
-    // Pointers carved from a JIT bump region must not be passed to glibc's
-    // free — they live in an mmap'd 256 KiB block, not in the glibc heap.
-    if (!tbjit::codegen::is_in_bump_region(ptr))
+
+    // Dispatch by region kind. Bump-allocated chunks accumulate until the
+    // process exits; free-list chunks return to the current thread's
+    // tl_freelists[slot]; everything else came from glibc.
+    tbjit::codegen::RegionInfo info{};
+    if (ptr && tbjit::codegen::find_region(ptr, &info)) {
+        if (info.kind == tbjit::codegen::RegionKind::FreeList) {
+            *static_cast<void**>(ptr) = tbjit::codegen::tl_freelists[info.slot_index].head;
+            tbjit::codegen::tl_freelists[info.slot_index].head = ptr;
+        }
+        // Bump: drop on the floor.
+    } else {
         real_free(ptr);
+    }
 
     reentrancy_guard = false;
 }
