@@ -13,6 +13,7 @@ add_integration_test(test_jit_roundtrip test_jit_roundtrip.cpp)
 
 add_executable(int_hello hello.cpp)
 add_executable(int_hello_freelist hello_freelist.cpp)
+add_executable(int_hello_arena hello_arena.cpp)
 
 # Basic: just check process exits 0 under LD_PRELOAD
 add_test(
@@ -61,5 +62,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   )
   set_tests_properties(int_freelist_verified PROPERTIES
     PASS_REGULAR_EXPRESSION "TLFreeList;jit_allocs:[ \t]*[1-9][0-9]*"
+  )
+
+  # EpochArena E2E: recycles its region in place rather than deopting on
+  # exhaust, so the same 60k-iter workload that would deopt BumpAlloc
+  # stays in the JIT path the entire time.
+  add_test(
+    NAME int_arena_verified
+    COMMAND ${CMAKE_COMMAND} -E env
+      LD_PRELOAD=$<TARGET_FILE:tbjit>
+      TBJIT_DUMP=1
+      TBJIT_FORCE_STRATEGY=arena
+      $<TARGET_FILE:int_hello_arena>
+  )
+  set_tests_properties(int_arena_verified PROPERTIES
+    PASS_REGULAR_EXPRESSION "EpochArena;jit_allocs:[ \t]*[1-9][0-9]*"
   )
 endif()

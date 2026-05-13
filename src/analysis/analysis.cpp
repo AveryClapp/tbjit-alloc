@@ -39,6 +39,7 @@ Strategy strategy_override() {
         if (!v) return Strategy::Generic;
         if (std::strcmp(v, "bump") == 0)     return Strategy::BumpAlloc;
         if (std::strcmp(v, "freelist") == 0) return Strategy::ThreadLocalFreeList;
+        if (std::strcmp(v, "arena") == 0)    return Strategy::EpochArena;
         return Strategy::Generic;
     }();
     return cached;

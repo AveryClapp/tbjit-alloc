@@ -338,4 +338,127 @@ size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
     return static_cast<size_t>(p - buf);
 }
 
+//
+// EpochArena routine layout (BumpAlloc with reset-in-place on exhaust):
+//
+// [fast path]                   ; same as BumpAlloc
+//   cmp rdi, dominant_size
+//   jne .deopt
+//   mov rax, fs:[tls_ptr_offset]
+//   lea rcx, [rax + dominant_size]
+//   cmp rcx, fs:[tls_end_offset]
+//   jae .reset
+//   mov fs:[tls_ptr_offset], rcx
+//   ret
+//
+// [.reset]                       ; recycle region; never calls into deopt
+//   mov edi, slot_index
+//   mov esi, dominant_size
+//   movabs rax, reset_alloc_fn
+//   call rax
+//   ret
+//
+// [.deopt]                       ; same as BumpAlloc — wrong-size guard only
+//   push rdi
+//   mov edi, call_site_id
+//   movabs rsi, buf
+//   movabs rax, deopt_handler
+//   call rax
+//   pop rdi
+//   movabs rax, real_malloc
+//   jmp rax
+//
+
+size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
+                        uint32_t tls_ptr_offset, uint32_t tls_end_offset,
+                        uint32_t slot_index,
+                        uint32_t dominant_size, uint32_t call_site_id,
+                        void* deopt_handler, void* reset_alloc_fn,
+                        void* real_malloc) {
+    if (!buf || buf_size < 200) return 0;
+
+    uint8_t* p = buf;
+
+    // cmp rdi, imm32
+    p = w8(p, 0x48); p = w8(p, 0x81); p = w8(p, 0xFF);
+    p = w32(p, dominant_size);
+
+    // jne .deopt (placeholder rel8)
+    p = w8(p, 0x75);
+    uint8_t* jne_deopt_off = p;
+    p = w8(p, 0x00);
+
+    // mov rax, fs:[tls_ptr_offset]
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x8B);
+    p = w8(p, 0x04); p = w8(p, 0x25);
+    p = w32(p, tls_ptr_offset);
+
+    // lea rcx, [rax + dominant_size]
+    if (dominant_size < 128) {
+        p = w8(p, 0x48); p = w8(p, 0x8D); p = w8(p, 0x48);
+        p = w8(p, static_cast<uint8_t>(dominant_size));
+    } else {
+        p = w8(p, 0x48); p = w8(p, 0x8D); p = w8(p, 0x88);
+        p = w32(p, dominant_size);
+    }
+
+    // cmp rcx, fs:[tls_end_offset]
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x3B);
+    p = w8(p, 0x0C); p = w8(p, 0x25);
+    p = w32(p, tls_end_offset);
+
+    // jae .reset (placeholder rel8)
+    p = w8(p, 0x73);
+    uint8_t* jae_reset_off = p;
+    p = w8(p, 0x00);
+
+    // mov fs:[tls_ptr_offset], rcx
+    p = w8(p, 0x64); p = w8(p, 0x48); p = w8(p, 0x89);
+    p = w8(p, 0x0C); p = w8(p, 0x25);
+    p = w32(p, tls_ptr_offset);
+
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .reset label ---
+    uint8_t* reset_label = p;
+    *jae_reset_off = static_cast<uint8_t>(reset_label - (jae_reset_off + 1));
+
+    // mov edi, slot_index
+    p = w8(p, 0xBF);
+    p = w32(p, slot_index);
+
+    // mov esi, dominant_size
+    p = w8(p, 0xBE);
+    p = w32(p, dominant_size);
+
+    // movabs rax, reset_alloc_fn
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(reset_alloc_fn));
+
+    // call rax
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+
+    // ret
+    p = w8(p, 0xC3);
+
+    // --- .deopt label ---
+    uint8_t* deopt_label = p;
+    *jne_deopt_off = static_cast<uint8_t>(deopt_label - (jne_deopt_off + 1));
+
+    p = w8(p, 0x57);
+    p = w8(p, 0xBF); p = w32(p, call_site_id);
+    p = w8(p, 0x48); p = w8(p, 0xBE);
+    p = w64(p, reinterpret_cast<uint64_t>(buf));
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
+    p = w8(p, 0xFF); p = w8(p, 0xD0);
+    p = w8(p, 0x5F);
+    p = w8(p, 0x48); p = w8(p, 0xB8);
+    p = w64(p, reinterpret_cast<uint64_t>(real_malloc));
+    p = w8(p, 0xFF); p = w8(p, 0xE0);
+
+    return static_cast<size_t>(p - buf);
+}
+
 } // namespace tbjit::codegen

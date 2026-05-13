@@ -28,4 +28,16 @@ size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
                            void* deopt_handler, void* refill_fn,
                            void* real_malloc);
 
+// Emits the EpochArena routine. Structurally close to BumpAlloc but
+// instead of deopting on region-exhaust the slow path calls
+// reset_alloc_fn which recycles the region in place.
+// tls_ptr_offset / tls_end_offset: fs-relative offsets of
+// tl_arenas[slot].ptr and .end respectively.
+size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
+                        uint32_t tls_ptr_offset, uint32_t tls_end_offset,
+                        uint32_t slot_index,
+                        uint32_t dominant_size, uint32_t call_site_id,
+                        void* deopt_handler, void* reset_alloc_fn,
+                        void* real_malloc);
+
 } // namespace tbjit::codegen
