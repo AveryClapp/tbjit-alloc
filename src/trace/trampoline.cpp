@@ -98,11 +98,20 @@ void free(void* ptr) {
                 case tbjit::Strategy::BumpAlloc:
                 case tbjit::Strategy::EpochArena:
                     break;  // chunks live until segment reclaim
-                case tbjit::Strategy::ThreadLocalFreeList:
-                    *static_cast<void**>(ptr) =
-                        tbjit::codegen::tl_freelists[s->slot_index].head;
-                    tbjit::codegen::tl_freelists[s->slot_index].head = ptr;
+                case tbjit::Strategy::ThreadLocalFreeList: {
+                    // Route by chunk's owning thread. Foreign frees go onto
+                    // the segment's MPSC remote queue; the owner thread
+                    // harvests on refill.
+                    uint32_t my_tid = tbjit::seg::current_tid();
+                    if (s->owner_tid == my_tid) {
+                        *static_cast<void**>(ptr) =
+                            tbjit::codegen::tl_freelists[s->slot_index].head;
+                        tbjit::codegen::tl_freelists[s->slot_index].head = ptr;
+                    } else {
+                        tbjit::seg::mpsc_push(s, ptr);
+                    }
                     break;
+                }
                 default: break;
             }
         } else {

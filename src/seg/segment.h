@@ -48,4 +48,14 @@ bool is_managed(const SegmentHeader* seg);
 void register_segment(SegmentHeader* seg);
 void unregister_segment(SegmentHeader* seg);
 
+uint32_t current_tid();
+
+// MPSC remote-free queue rooted at seg->remote_head. Producers (non-owner
+// threads) push freed chunks via mpsc_push (each chunk's first 8 bytes hold
+// the next pointer while on the list). The owner thread harvests via
+// mpsc_harvest, which returns the entire chain or nullptr and atomically
+// resets remote_head.
+void  mpsc_push(SegmentHeader* seg, void* chunk);
+void* mpsc_harvest(SegmentHeader* seg);
+
 } // namespace tbjit::seg

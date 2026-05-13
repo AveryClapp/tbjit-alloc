@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace tbjit::seg { struct SegmentHeader; }
+
 namespace tbjit::codegen {
 
 constexpr size_t MAX_COMPILED_SITES = 4096;
@@ -18,7 +20,10 @@ struct BumpSlot {
 };
 
 struct FreeListSlot {
-    void* head;     // head of singly-linked free list; null = empty/uninitialized
+    void*                       head;   // head of singly-linked free list
+    tbjit::seg::SegmentHeader*  segs;   // intrusive list of segments for this
+                                        // (slot, thread); used to harvest the
+                                        // MPSC remote-free queues on refill
 };
 
 struct ArenaSlot {

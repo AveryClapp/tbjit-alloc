@@ -19,19 +19,6 @@ std::atomic<SegmentHeader*> g_index[MAX_SEGMENTS];
 std::atomic<size_t>         g_index_count{0};
 pthread_mutex_t             g_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-uint32_t current_tid() {
-#if defined(__linux__)
-    static thread_local uint32_t cached = 0;
-    if (cached == 0)
-        cached = static_cast<uint32_t>(syscall(SYS_gettid));
-    return cached;
-#else
-    // macOS / dev: use pthread_self as a stable but opaque tid.
-    return static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(pthread_self()) & 0xffffffffu);
-#endif
-}
-
 void* aligned_mmap_2mib() {
     // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
     // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
@@ -55,6 +42,32 @@ void* aligned_mmap_2mib() {
 }
 
 } // namespace
+
+uint32_t current_tid() {
+#if defined(__linux__)
+    static thread_local uint32_t cached = 0;
+    if (cached == 0)
+        cached = static_cast<uint32_t>(syscall(SYS_gettid));
+    return cached;
+#else
+    return static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(pthread_self()) & 0xffffffffu);
+#endif
+}
+
+void mpsc_push(SegmentHeader* seg, void* chunk) {
+    void* cur = seg->remote_head.load(std::memory_order_relaxed);
+    do {
+        *static_cast<void**>(chunk) = cur;
+    } while (!seg->remote_head.compare_exchange_weak(
+        cur, chunk,
+        std::memory_order_release,
+        std::memory_order_relaxed));
+}
+
+void* mpsc_harvest(SegmentHeader* seg) {
+    return seg->remote_head.exchange(nullptr, std::memory_order_acquire);
+}
 
 SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size) {

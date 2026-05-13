@@ -19,9 +19,33 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
 void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 
+    // First: harvest any chunks foreign threads have pushed back via MPSC.
+    // Walk all segments owned by (this slot, this thread) and drain each.
+    void* harvested = nullptr;
+    for (seg::SegmentHeader* s = tl_freelists[index].segs; s;
+         s = s->next_in_site) {
+        void* chain = seg::mpsc_harvest(s);
+        while (chain) {
+            void* nxt = *static_cast<void**>(chain);
+            *static_cast<void**>(chain) = harvested;
+            harvested = chain;
+            chain = nxt;
+        }
+    }
+    if (harvested) {
+        void* chunk = harvested;
+        tl_freelists[index].head = *static_cast<void**>(harvested);
+        return chunk;
+    }
+
+    // Nothing recovered — mmap a fresh segment.
     seg::SegmentHeader* s = seg::alloc_segment(
-        Strategy::ThreadLocalFreeList, index, /*site=*/g_slot_to_site[index], obj_size);
+        Strategy::ThreadLocalFreeList, index,
+        g_slot_to_site[index], obj_size);
     assert(s);
+    s->next_in_site = tl_freelists[index].segs;
+    tl_freelists[index].segs = s;
+
     uint8_t* base = seg::payload_start(s);
     uint8_t* end  = seg::segment_end(s);
 
