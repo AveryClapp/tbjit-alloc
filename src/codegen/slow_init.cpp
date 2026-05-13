@@ -91,18 +91,13 @@ bool is_in_bump_region(const void* ptr) {
 }
 
 uint8_t* arena_slow_init(uint32_t index, uint32_t size) {
-    void* mem = mmap(nullptr, ARENA_REGION_SIZE,
-                     PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    assert(mem != MAP_FAILED);
-
-    uint8_t* base = static_cast<uint8_t*>(mem);
+    seg::SegmentHeader* s = seg::alloc_segment(
+        Strategy::EpochArena, index, /*site=*/0, size);
+    assert(s);
+    uint8_t* base = seg::payload_start(s);
     tl_arenas[index].base = base;
     tl_arenas[index].ptr  = base + size;
-    tl_arenas[index].end  = base + ARENA_REGION_SIZE;
-    // Register as Bump-kind so the free interceptor drops these pointers
-    // on the floor — same lifetime semantics as bump (epoch-scoped, no free).
-    register_region(base, base + ARENA_REGION_SIZE, RegionKind::Bump, 0);
+    tl_arenas[index].end  = seg::segment_end(s);
     return base;
 }
 
