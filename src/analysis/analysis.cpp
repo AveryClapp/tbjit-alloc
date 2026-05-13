@@ -25,6 +25,7 @@ namespace {
 constexpr size_t   MAX_CALL_SITES        = 4096;
 constexpr uint32_t STABLE_WINDOWS_NEEDED = 10;
 constexpr double   KS_ALPHA              = 0.05;
+constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, stop recompiling
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -63,6 +64,16 @@ void advance_prespec(CallSiteSummary* s) {
     if (stable) {
         ++s->stable_windows;
         if (s->stable_windows >= STABLE_WINDOWS_NEEDED) {
+            // Blacklisted sites stay in PreSpec forever — analysis still
+            // runs but compile() is skipped. Avoids pathological recompile
+            // loops on call sites that keep deopting (truly polymorphic,
+            // size-changing over time, etc).
+            if (s->blacklisted) {
+                s->stable_windows = 0;
+                s->active = 1 - s->active;
+                s->windows[s->active].reset();
+                return;
+            }
             s->baseline  = s->windows[s->active].hist;
             Strategy forced = strategy_override();
             s->candidate = (forced != Strategy::Generic)
@@ -202,6 +213,9 @@ Strategy get_candidate_strategy(CallSiteID id) {
 void reset_call_site(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i) {
         if (g_summaries[i].id == id) {
+            ++g_summaries[i].deopt_count;
+            if (g_summaries[i].deopt_count >= DEOPT_BLACKLIST_LIMIT)
+                g_summaries[i].blacklisted = true;
             g_summaries[i].phase = Phase::Deopt;
             g_summaries[i].code_page = nullptr;
             g_summaries[i].stable_windows = 0;

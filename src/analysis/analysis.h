@@ -22,6 +22,8 @@ struct CallSiteSummary {
     Phase       phase{Phase::PreSpec};
     uint64_t    event_count{0};
     uint32_t    stable_windows{0};
+    uint32_t    deopt_count{0};      // total deopts seen; blacklist threshold
+    bool        blacklisted{false};  // true → never recompile this site
 
     SizeWindow  windows[2];
     uint8_t     active{0};
