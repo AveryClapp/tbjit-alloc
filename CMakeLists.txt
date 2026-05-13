@@ -5,6 +5,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# tbjit_obj is linked into both libtbjit.so (PIC) and the unit-test
+# executables. Building everything PIE matches the codegen.cpp's TLS access
+# pattern — without this, the linker tries to relax IE→LE for the
+# unit-test executables and fails on `tl_*` references emitted as
+# GOTTPOFF relocations.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
