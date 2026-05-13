@@ -1,27 +1,103 @@
 #include "shadow.h"
 #ifdef TBJIT_SHADOW
 
-#include <cstdlib>
-#include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <pthread.h>
+
+// Shadow validator records every JIT-served allocation in an open-addressing
+// hash table keyed by pointer. On free we look the pointer up and erase the
+// entry. Untracked pointers (those from the generic glibc path) are silently
+// ignored. Violations of the invariants (null return, misaligned pointer,
+// double-alloc on a live slot) abort so faults in the JIT path surface
+// immediately rather than as delayed heap corruption.
+//
+// Compiles only into libtbjit_shadow (the parallel binary used for debug/CI
+// runs); production libtbjit gets the no-op inline stubs from shadow.h.
 
 namespace tbjit::shadow {
 
-void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
-    void* ref = std::malloc(size);
-    // Size and alignment checks against jit_ptr
-    // TODO: compare alignment, record (id, ref, jit_ptr) pair for free validation
-    assert(jit_ptr != nullptr && "JIT'd alloc returned null");
-    assert((reinterpret_cast<uintptr_t>(jit_ptr) % alignof(max_align_t)) == 0
-           && "JIT'd alloc misaligned");
-    std::free(ref);
-    (void)id;
+namespace {
+
+struct Entry {
+    void*       ptr;     // null = empty slot
+    size_t      size;
+    CallSiteID  alloc_id;
+};
+
+constexpr size_t TABLE_SIZE = 1u << 17;  // 128k slots — covers ~5460 live * many call sites
+Entry            g_table[TABLE_SIZE];
+pthread_mutex_t  g_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+size_t hash_ptr(void* p) {
+    uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    v ^= v >> 21;
+    v *= 0xbf58476d1ce4e5b9ULL;
+    v ^= v >> 27;
+    return static_cast<size_t>(v) & (TABLE_SIZE - 1);
 }
 
-void validate_free(CallSiteID id, void* ptr) {
-    // TODO: verify ptr is a known JIT'd allocation
-    (void)id;
-    (void)ptr;
+[[noreturn]] void fail(const char* msg, void* ptr) {
+    fprintf(stderr, "tbjit shadow: %s ptr=%p\n", msg, ptr);
+    std::abort();
+}
+
+} // namespace
+
+void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
+    if (!jit_ptr) fail("alloc returned null", jit_ptr);
+    if ((reinterpret_cast<uintptr_t>(jit_ptr) % alignof(max_align_t)) != 0)
+        fail("alloc misaligned", jit_ptr);
+
+    pthread_mutex_lock(&g_mutex);
+    size_t i = hash_ptr(jit_ptr);
+    size_t scanned = 0;
+    while (g_table[i].ptr != nullptr) {
+        if (g_table[i].ptr == jit_ptr) {
+            pthread_mutex_unlock(&g_mutex);
+            fail("alloc returned a pointer that's already tracked", jit_ptr);
+        }
+        i = (i + 1) & (TABLE_SIZE - 1);
+        if (++scanned >= TABLE_SIZE) {
+            pthread_mutex_unlock(&g_mutex);
+            fail("shadow table full", jit_ptr);
+        }
+    }
+    g_table[i] = {jit_ptr, size, id};
+    pthread_mutex_unlock(&g_mutex);
+}
+
+void validate_free(CallSiteID /*free_id*/, void* ptr) {
+    if (!ptr) return;  // free(NULL) is a well-defined no-op
+    pthread_mutex_lock(&g_mutex);
+    size_t i = hash_ptr(ptr);
+    size_t scanned = 0;
+    while (g_table[i].ptr != ptr) {
+        if (g_table[i].ptr == nullptr) {
+            // Untracked: came from the generic path, not the JIT.
+            pthread_mutex_unlock(&g_mutex);
+            return;
+        }
+        i = (i + 1) & (TABLE_SIZE - 1);
+        if (++scanned >= TABLE_SIZE) {
+            pthread_mutex_unlock(&g_mutex);
+            return;  // not present
+        }
+    }
+    // Backward shift to keep the cluster densely packed (linear-probing
+    // deletion). Without this an unlucky cluster could leak slots.
+    g_table[i].ptr = nullptr;
+    size_t j = (i + 1) & (TABLE_SIZE - 1);
+    while (g_table[j].ptr != nullptr) {
+        Entry e = g_table[j];
+        g_table[j].ptr = nullptr;
+        size_t k = hash_ptr(e.ptr);
+        while (g_table[k].ptr != nullptr) k = (k + 1) & (TABLE_SIZE - 1);
+        g_table[k] = e;
+        j = (j + 1) & (TABLE_SIZE - 1);
+    }
+    pthread_mutex_unlock(&g_mutex);
 }
 
 } // namespace tbjit::shadow
