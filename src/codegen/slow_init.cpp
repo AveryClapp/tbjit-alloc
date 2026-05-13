@@ -7,7 +7,7 @@ namespace tbjit::codegen {
 
 uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
     seg::SegmentHeader* s = seg::alloc_segment(
-        Strategy::BumpAlloc, index, /*site=*/0, size);
+        Strategy::BumpAlloc, index, /*site=*/g_slot_to_site[index], size);
     assert(s);
     uint8_t* base = seg::payload_start(s);
     tl_bumps[index].ptr = base + size;
@@ -20,7 +20,7 @@ void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 
     seg::SegmentHeader* s = seg::alloc_segment(
-        Strategy::ThreadLocalFreeList, index, /*site=*/0, obj_size);
+        Strategy::ThreadLocalFreeList, index, /*site=*/g_slot_to_site[index], obj_size);
     assert(s);
     uint8_t* base = seg::payload_start(s);
     uint8_t* end  = seg::segment_end(s);
@@ -38,7 +38,7 @@ void* freelist_refill(uint32_t index, uint32_t obj_size) {
 
 uint8_t* arena_slow_init(uint32_t index, uint32_t size) {
     seg::SegmentHeader* s = seg::alloc_segment(
-        Strategy::EpochArena, index, /*site=*/0, size);
+        Strategy::EpochArena, index, /*site=*/g_slot_to_site[index], size);
     assert(s);
     uint8_t* base = seg::payload_start(s);
     tl_arenas[index].base = base;

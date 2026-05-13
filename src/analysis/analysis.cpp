@@ -7,6 +7,7 @@
 #include "codegen/codegen.h"
 #include "dispatch/dispatch.h"
 #include "deopt/deopt.h"
+#include "seg/segment.h"
 #include <new>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -26,6 +27,8 @@ constexpr size_t   MAX_CALL_SITES        = 4096;
 constexpr uint32_t STABLE_WINDOWS_NEEDED = 10;
 constexpr double   KS_ALPHA              = 0.05;
 constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, stop recompiling
+constexpr double   LIFETIME_REAP_RATIO   = 0.50;  // free_count/event_count >= → Reap
+constexpr double   LIFETIME_HOLD_RATIO   = 0.10;  // free_count/event_count <  → Hold
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -75,6 +78,16 @@ void advance_prespec(CallSiteSummary* s) {
                 return;
             }
             s->baseline  = s->windows[s->active].hist;
+            // Derive lifetime tag from observed free/alloc ratio. Used by
+            // the future reaper to decide which retired segments are safe
+            // to munmap eagerly.
+            if (s->event_count > 0) {
+                double r = static_cast<double>(s->free_count) /
+                           static_cast<double>(s->event_count);
+                if      (r >= LIFETIME_REAP_RATIO) s->lifetime = LifetimeTag::Reap;
+                else if (r <  LIFETIME_HOLD_RATIO) s->lifetime = LifetimeTag::Hold;
+                else                                s->lifetime = LifetimeTag::Unknown;
+            }
             Strategy forced = strategy_override();
             s->candidate = (forced != Strategy::Generic)
                 ? forced
@@ -182,7 +195,19 @@ void reset_state() {
 }
 
 void process_event(const AllocEvent& ev) {
-    if (ev.size == 0 || ev.size >= ExactHistogram::MAX_SIZE) return;
+    // Free events (size == 0) carry the freeing call site in ev.call_site
+    // and the freed pointer in ev.ptr. Attribute the free back to the
+    // *allocating* site via the segment header.
+    if (ev.size == 0) {
+        if (!ev.ptr) return;
+        seg::SegmentHeader* h = seg::of(ev.ptr);
+        if (!seg::is_managed(h)) return;
+        if (CallSiteSummary* s = find_or_create(h->alloc_site))
+            ++s->free_count;
+        return;
+    }
+
+    if (ev.size >= ExactHistogram::MAX_SIZE) return;
     CallSiteSummary* s = find_or_create(ev.call_site);
     if (!s) return;
     ++s->event_count;
@@ -208,6 +233,12 @@ Strategy get_candidate_strategy(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i)
         if (g_summaries[i].id == id) return g_summaries[i].candidate;
     return Strategy::Generic;
+}
+
+LifetimeTag get_lifetime_tag(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i)
+        if (g_summaries[i].id == id) return g_summaries[i].lifetime;
+    return LifetimeTag::Unknown;
 }
 
 void reset_call_site(CallSiteID id) {

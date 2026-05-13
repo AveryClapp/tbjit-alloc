@@ -1,10 +1,16 @@
 #pragma once
+#include "common.h"
 #include <cstddef>
 #include <cstdint>
 
 namespace tbjit::codegen {
 
 constexpr size_t MAX_COMPILED_SITES = 4096;
+
+// Maps slot_index → CallSiteID. Written once when a slot is assigned for a
+// specific (site, strategy) compile, read by slow_init.cpp when populating
+// the segment header. Lock-free, write-once per slot.
+extern CallSiteID g_slot_to_site[MAX_COMPILED_SITES];
 
 struct BumpSlot {
     uint8_t* ptr;   // current bump position (null = uninitialized)

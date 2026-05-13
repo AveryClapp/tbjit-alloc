@@ -38,6 +38,7 @@ void* compile(const RoutineSpec& spec) {
 
     uint32_t idx = alloc_slot_index();
     if (idx >= static_cast<uint32_t>(MAX_COMPILED_SITES)) return nullptr;
+    g_slot_to_site[idx] = spec.id;
 
     uint8_t* page = static_cast<uint8_t*>(alloc_exec_page());
     size_t n = 0;
