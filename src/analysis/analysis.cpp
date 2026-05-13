@@ -6,6 +6,7 @@
 #include "trace/writer.h"
 #include "codegen/codegen.h"
 #include "dispatch/dispatch.h"
+#include "deopt/deopt.h"
 #include <new>
 #include <sys/mman.h>
 #include <pthread.h>
@@ -100,6 +101,7 @@ bool drain_all() {
 void* background_loop(void*) {
     uint32_t backoff_us = 1;
     while (g_running.load(std::memory_order_acquire)) {
+        tbjit::deopt::drain_pending();
         if (drain_all()) {
             backoff_us = 1;
             continue;
@@ -116,6 +118,7 @@ void* background_loop(void*) {
             futex_wait();
         }
     }
+    tbjit::deopt::drain_pending();
     drain_all(); // final drain on shutdown
     return nullptr;
 }

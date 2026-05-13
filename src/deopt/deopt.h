@@ -14,4 +14,9 @@ void handle(CallSiteID id, void* code_page);
 // reclamation at epoch N can be freed.
 void mark_safe_point();
 
+// Background-thread-only: drains the deopt queue (running reset_call_site
+// for each entry), then reclaims pages whose epoch has been observed by
+// every registered thread. Must NOT be called from allocator threads.
+void drain_pending();
+
 } // namespace tbjit::deopt
