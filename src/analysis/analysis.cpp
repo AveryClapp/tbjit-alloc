@@ -12,6 +12,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 
 namespace tbjit::analysis {
 
@@ -27,6 +29,20 @@ constexpr double   KS_ALPHA              = 0.05;
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
 pthread_t             g_thread;
+
+// Strategy override: TBJIT_FORCE_STRATEGY={bump,freelist} overrides the
+// is_monomorphic-based candidate pick. Read once on first call to avoid
+// re-scanning the env on every stable transition.
+Strategy strategy_override() {
+    static Strategy cached = []() {
+        const char* v = std::getenv("TBJIT_FORCE_STRATEGY");
+        if (!v) return Strategy::Generic;
+        if (std::strcmp(v, "bump") == 0)     return Strategy::BumpAlloc;
+        if (std::strcmp(v, "freelist") == 0) return Strategy::ThreadLocalFreeList;
+        return Strategy::Generic;
+    }();
+    return cached;
+}
 
 CallSiteSummary* find_or_create(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i)
@@ -47,9 +63,12 @@ void advance_prespec(CallSiteSummary* s) {
         ++s->stable_windows;
         if (s->stable_windows >= STABLE_WINDOWS_NEEDED) {
             s->baseline  = s->windows[s->active].hist;
-            s->candidate = s->windows[s->active].hist.is_monomorphic(0.95)
-                               ? Strategy::BumpAlloc
-                               : Strategy::ThreadLocalFreeList;
+            Strategy forced = strategy_override();
+            s->candidate = (forced != Strategy::Generic)
+                ? forced
+                : (s->windows[s->active].hist.is_monomorphic(0.95)
+                       ? Strategy::BumpAlloc
+                       : Strategy::ThreadLocalFreeList);
             s->phase = Phase::Compiled;
             {
                 codegen::RoutineSpec spec{s->id, s->candidate,

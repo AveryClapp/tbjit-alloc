@@ -12,6 +12,7 @@ endfunction()
 add_integration_test(test_jit_roundtrip test_jit_roundtrip.cpp)
 
 add_executable(int_hello hello.cpp)
+add_executable(int_hello_freelist hello_freelist.cpp)
 
 # Basic: just check process exits 0 under LD_PRELOAD
 add_test(
@@ -45,5 +46,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   )
   set_tests_properties(int_jit_verified PROPERTIES
     PASS_REGULAR_EXPRESSION "BumpAlloc;jit_allocs:[ \t]*[1-9][0-9]*"
+  )
+
+  # TLFreeList E2E: forces the free-list strategy and runs a long monomorphic
+  # alloc/free loop that BumpAlloc would not survive (would deopt at ~5460
+  # iters when its 256 KiB region is exhausted; free list recycles forever).
+  add_test(
+    NAME int_freelist_verified
+    COMMAND ${CMAKE_COMMAND} -E env
+      LD_PRELOAD=$<TARGET_FILE:tbjit>
+      TBJIT_DUMP=1
+      TBJIT_FORCE_STRATEGY=freelist
+      $<TARGET_FILE:int_hello_freelist>
+  )
+  set_tests_properties(int_freelist_verified PROPERTIES
+    PASS_REGULAR_EXPRESSION "TLFreeList;jit_allocs:[ \t]*[1-9][0-9]*"
   )
 endif()
