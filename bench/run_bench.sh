@@ -27,14 +27,20 @@ if [[ ! -f "$LIB" ]]; then
   exit 1
 fi
 
-PATTERNS=(monomorphic arena mixed pulse)
+PATTERNS=(monomorphic arena mixed pulse bimodal lifo producer_consumer hold)
 
-# Strategies to try per pattern. "" means run baseline (no LD_PRELOAD).
+# Strategies to try per pattern. "baseline" runs the bench standalone
+# (glibc only). "auto" runs under LD_PRELOAD with no TBJIT_FORCE_STRATEGY
+# so the analyzer picks; everything else is a forced strategy.
 declare -A STRATEGIES
-STRATEGIES[monomorphic]="baseline bump arena freelist"
-STRATEGIES[arena]="baseline bump arena freelist"
-STRATEGIES[mixed]="baseline freelist"
-STRATEGIES[pulse]="baseline bump arena freelist"
+STRATEGIES[monomorphic]="baseline auto bump arena freelist"
+STRATEGIES[arena]="baseline auto bump arena freelist"
+STRATEGIES[mixed]="baseline auto freelist"
+STRATEGIES[pulse]="baseline auto bump arena freelist"
+STRATEGIES[bimodal]="baseline auto"
+STRATEGIES[lifo]="baseline auto"
+STRATEGIES[producer_consumer]="baseline auto"
+STRATEGIES[hold]="baseline auto bump"
 
 printf '\n%-14s %-10s %-10s %-12s\n' "pattern" "strategy" "phase" "ns/op"
 printf '%-14s %-10s %-10s %-12s\n'  "-------" "--------" "-----" "-----"
@@ -50,6 +56,8 @@ run_one() {
   local out
   if [[ "$strategy" == "baseline" ]]; then
     out=$("$bin")
+  elif [[ "$strategy" == "auto" ]]; then
+    out=$(LD_PRELOAD="$LIB" "$bin")
   else
     out=$(LD_PRELOAD="$LIB" TBJIT_FORCE_STRATEGY="$strategy" "$bin")
   fi

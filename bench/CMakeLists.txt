@@ -14,5 +14,14 @@ add_bench(bench_arena       arena.cpp)
 add_bench(bench_mixed       mixed.cpp)
 add_bench(bench_pulse       pulse.cpp)
 
+# Picker-specific patterns added with the deferred-items work; each is
+# designed to push one of the new analyzer signals over its trigger
+# threshold (multi-class, paired-stack, producer-consumer, hold lifetime).
+add_bench(bench_bimodal         bimodal.cpp)
+add_bench(bench_lifo            lifo.cpp)
+add_bench(bench_producer_consumer producer_consumer.cpp)
+target_link_libraries(bench_producer_consumer PRIVATE pthread)
+add_bench(bench_hold            hold.cpp)
+
 # Legacy alias — older docs/scripts referenced bench_throughput.
 add_custom_target(bench_throughput DEPENDS bench_monomorphic)
