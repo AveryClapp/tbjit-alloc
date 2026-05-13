@@ -28,6 +28,7 @@ set(TBJIT_SOURCES
   src/codegen/slow_init.cpp
   src/dispatch/dispatch.cpp
   src/deopt/deopt.cpp
+  src/seg/segment.cpp
 )
 
 set(TBJIT_COMPILE_OPTIONS -Wall -Wextra -fno-exceptions -fno-rtti)
