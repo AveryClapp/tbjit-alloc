@@ -25,6 +25,26 @@ struct SizeWindow {
     void reset() { hist.reset(); count = 0; }
 };
 
+// Single-mode top-1 thread-id distribution. Replaces top_tid whenever a
+// non-matching event arrives more than half the time; tracks alloc/free
+// concentration cheaply (no hash table). 'total' counts events seen.
+struct ThreadDist {
+    uint32_t top_tid{0};
+    uint32_t top_count{0};
+    uint32_t total{0};
+
+    void record(uint32_t tid) {
+        ++total;
+        if (top_count == 0 || tid == top_tid) {
+            top_tid = tid;
+            ++top_count;
+        } else if (--top_count == 0) {
+            top_tid = tid;
+            top_count = 1;
+        }
+    }
+};
+
 struct CallSiteSummary {
     CallSiteID  id{0};
     Phase       phase{Phase::PreSpec};
@@ -34,6 +54,9 @@ struct CallSiteSummary {
     uint32_t    deopt_count{0};      // total deopts seen; blacklist threshold
     bool        blacklisted{false};  // true → never recompile this site
     LifetimeTag lifetime{LifetimeTag::Unknown};
+
+    ThreadDist  alloc_dist;
+    ThreadDist  free_dist;
 
     SizeWindow  windows[2];
     uint8_t     active{0};

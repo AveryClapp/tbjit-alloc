@@ -29,11 +29,18 @@ void make_executable(void* page) {
 
 void* compile(const RoutineSpec& spec) {
     if (spec.size == 0 || spec.size >= tbjit::analysis::ExactHistogram::MAX_SIZE) return nullptr;
-    if (spec.strategy != Strategy::BumpAlloc &&
-        spec.strategy != Strategy::ThreadLocalFreeList &&
-        spec.strategy != Strategy::EpochArena) return nullptr;
+    // ProducerConsumer reuses the TLFreeList codegen path for now; the
+    // existing Phase 2 MPSC routing already separates producer-thread allocs
+    // from consumer-thread frees. A differentiated bump-style producer path
+    // is future work.
+    Strategy effective = spec.strategy;
+    if (effective == Strategy::ProducerConsumer)
+        effective = Strategy::ThreadLocalFreeList;
+    if (effective != Strategy::BumpAlloc &&
+        effective != Strategy::ThreadLocalFreeList &&
+        effective != Strategy::EpochArena) return nullptr;
     // Free-list chunks need to fit a `next` pointer in their first 8 bytes.
-    if (spec.strategy == Strategy::ThreadLocalFreeList && spec.size < sizeof(void*))
+    if (effective == Strategy::ThreadLocalFreeList && spec.size < sizeof(void*))
         return nullptr;
 
     uint32_t idx = alloc_slot_index();
@@ -43,7 +50,7 @@ void* compile(const RoutineSpec& spec) {
     uint8_t* page = static_cast<uint8_t*>(alloc_exec_page());
     size_t n = 0;
 
-    if (spec.strategy == Strategy::BumpAlloc) {
+    if (effective == Strategy::BumpAlloc) {
 #if defined(__linux__) && defined(__x86_64__)
         uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
         uint32_t ptr_off = static_cast<uint32_t>(
@@ -62,7 +69,7 @@ void* compile(const RoutineSpec& spec) {
             reinterpret_cast<void*>(tbjit::deopt::handle),
             reinterpret_cast<void*>(bump_slow_init),
             reinterpret_cast<void*>(g_real_malloc));
-    } else if (spec.strategy == Strategy::ThreadLocalFreeList) {
+    } else if (effective == Strategy::ThreadLocalFreeList) {
 #if defined(__linux__) && defined(__x86_64__)
         uintptr_t tp = reinterpret_cast<uintptr_t>(__builtin_thread_pointer());
         uint32_t head_off = static_cast<uint32_t>(

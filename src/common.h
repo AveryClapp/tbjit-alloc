@@ -21,6 +21,7 @@ enum class Strategy : uint8_t {
     ThreadLocalFreeList = 2,
     EpochArena          = 3,
     PairedStack         = 4,
+    ProducerConsumer    = 5,
 };
 
 struct AllocEvent {

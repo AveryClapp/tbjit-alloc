@@ -29,6 +29,7 @@ constexpr double   KS_ALPHA              = 0.05;
 constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, stop recompiling
 constexpr double   LIFETIME_REAP_RATIO   = 0.50;  // free_count/event_count >= → Reap
 constexpr double   LIFETIME_HOLD_RATIO   = 0.10;  // free_count/event_count <  → Hold
+constexpr double   PC_TID_CONCENTRATION  = 0.95;  // top_count/total >= → concentrated
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -88,12 +89,28 @@ void advance_prespec(CallSiteSummary* s) {
                 else if (r <  LIFETIME_HOLD_RATIO) s->lifetime = LifetimeTag::Hold;
                 else                                s->lifetime = LifetimeTag::Unknown;
             }
+            // Producer-consumer detection: alloc dist concentrated on one
+            // thread, free dist concentrated on a *different* thread.
+            auto concentrated = [](const ThreadDist& d) {
+                return d.total > 0 &&
+                       static_cast<double>(d.top_count) /
+                       static_cast<double>(d.total) >= PC_TID_CONCENTRATION;
+            };
+            bool pc_pattern =
+                concentrated(s->alloc_dist) &&
+                concentrated(s->free_dist) &&
+                s->alloc_dist.top_tid != s->free_dist.top_tid;
+
             Strategy forced = strategy_override();
-            s->candidate = (forced != Strategy::Generic)
-                ? forced
-                : (s->windows[s->active].hist.is_monomorphic(0.95)
-                       ? Strategy::BumpAlloc
-                       : Strategy::ThreadLocalFreeList);
+            if (forced != Strategy::Generic) {
+                s->candidate = forced;
+            } else if (pc_pattern) {
+                s->candidate = Strategy::ProducerConsumer;
+            } else if (s->windows[s->active].hist.is_monomorphic(0.95)) {
+                s->candidate = Strategy::BumpAlloc;
+            } else {
+                s->candidate = Strategy::ThreadLocalFreeList;
+            }
             s->phase = Phase::Compiled;
             {
                 codegen::RoutineSpec spec{s->id, s->candidate,
@@ -202,8 +219,10 @@ void process_event(const AllocEvent& ev) {
         if (!ev.ptr) return;
         seg::SegmentHeader* h = seg::of(ev.ptr);
         if (!seg::is_managed(h)) return;
-        if (CallSiteSummary* s = find_or_create(h->alloc_site))
+        if (CallSiteSummary* s = find_or_create(h->alloc_site)) {
             ++s->free_count;
+            s->free_dist.record(ev.thread_id);
+        }
         return;
     }
 
@@ -211,6 +230,7 @@ void process_event(const AllocEvent& ev) {
     CallSiteSummary* s = find_or_create(ev.call_site);
     if (!s) return;
     ++s->event_count;
+    s->alloc_dist.record(ev.thread_id);
 
     if (s->phase == Phase::Deopt) s->phase = Phase::PreSpec;
 
