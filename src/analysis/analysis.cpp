@@ -32,6 +32,8 @@ constexpr double   LIFETIME_HOLD_RATIO   = 0.10;  // free_count/event_count <  �
 constexpr double   PC_TID_CONCENTRATION  = 0.95;  // top_count/total >= → concentrated
 constexpr double   MULTI_CLASS_COVERAGE  = 0.90;  // top-K modes must cover this fraction
 constexpr size_t   MULTI_CLASS_MAX       = 4;     // max classes to learn per site
+constexpr double   PAIRED_PAIR_RATIO     = 0.95;  // pair_count/event_count >= → pair-dominant
+constexpr double   PAIRED_LIFO_RATIO     = 0.95;  // lifo_count/pair_count >= → strict LIFO
 
 std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
@@ -112,9 +114,22 @@ void advance_prespec(CallSiteSummary* s) {
             for (size_t i = 0; i < nclass; ++i)
                 s->classes[i] = {modes[i].size, modes[i].count};
 
+            // PairedStack: dominant freeing site + frees match LIFO order.
+            bool paired_pattern = false;
+            if (s->event_count > 0 && s->top_pair.pair_count > 0) {
+                double pr = static_cast<double>(s->top_pair.pair_count) /
+                            static_cast<double>(s->event_count);
+                double lr = static_cast<double>(s->top_pair.lifo_count) /
+                            static_cast<double>(s->top_pair.pair_count);
+                paired_pattern = pr >= PAIRED_PAIR_RATIO &&
+                                 lr >= PAIRED_LIFO_RATIO;
+            }
+
             Strategy forced = strategy_override();
             if (forced != Strategy::Generic) {
                 s->candidate = forced;
+            } else if (paired_pattern) {
+                s->candidate = Strategy::PairedStack;
             } else if (pc_pattern) {
                 s->candidate = Strategy::ProducerConsumer;
             } else if (s->windows[s->active].hist.is_monomorphic(0.95)) {
@@ -230,11 +245,45 @@ void process_event(const AllocEvent& ev) {
     // *allocating* site via the segment header.
     if (ev.size == 0) {
         if (!ev.ptr) return;
+        // Find the allocating-site summary. For seg-managed allocs (post-JIT)
+        // the segment header tells us directly; for pre-JIT (glibc) allocs
+        // we scan summaries' lifo_stack tops looking for a match.
+        CallSiteSummary* alloc_s = nullptr;
         seg::SegmentHeader* h = seg::of(ev.ptr);
-        if (!seg::is_managed(h)) return;
-        if (CallSiteSummary* s = find_or_create(h->alloc_site)) {
-            ++s->free_count;
-            s->free_dist.record(ev.thread_id);
+        if (seg::is_managed(h)) {
+            alloc_s = find_or_create(h->alloc_site);
+        } else {
+            for (size_t i = 0; i < g_summary_count; ++i) {
+                CallSiteSummary& cs = g_summaries[i];
+                if (cs.lifo_head > 0 &&
+                    cs.lifo_stack[cs.lifo_head - 1] == ev.ptr) {
+                    alloc_s = &cs;
+                    break;
+                }
+            }
+        }
+        if (!alloc_s) return;
+
+        ++alloc_s->free_count;
+        alloc_s->free_dist.record(ev.thread_id);
+
+        // Track dominant freeing site via Boyer-Moore majority.
+        if (alloc_s->top_pair.pair_count == 0 ||
+            alloc_s->top_pair.free_site == ev.call_site) {
+            alloc_s->top_pair.free_site = ev.call_site;
+            ++alloc_s->top_pair.pair_count;
+        } else if (--alloc_s->top_pair.pair_count == 0) {
+            alloc_s->top_pair.free_site = ev.call_site;
+            alloc_s->top_pair.pair_count = 1;
+            alloc_s->top_pair.lifo_count = 0;
+        }
+
+        // LIFO discipline: did the freed ptr match the top of the stack?
+        if (alloc_s->lifo_head > 0 &&
+            alloc_s->lifo_stack[alloc_s->lifo_head - 1] == ev.ptr) {
+            --alloc_s->lifo_head;
+            if (alloc_s->top_pair.free_site == ev.call_site)
+                ++alloc_s->top_pair.lifo_count;
         }
         return;
     }
@@ -244,6 +293,19 @@ void process_event(const AllocEvent& ev) {
     if (!s) return;
     ++s->event_count;
     s->alloc_dist.record(ev.thread_id);
+
+    // Track this allocation on the per-site LIFO ring (oldest entry is
+    // overwritten on overflow). Used by PairedStack detection.
+    if (ev.ptr) {
+        if (s->lifo_head < 16) {
+            s->lifo_stack[s->lifo_head++] = ev.ptr;
+        } else {
+            // ring: shift down by 1
+            for (int i = 0; i < 15; ++i)
+                s->lifo_stack[i] = s->lifo_stack[i + 1];
+            s->lifo_stack[15] = ev.ptr;
+        }
+    }
 
     if (s->phase == Phase::Deopt) s->phase = Phase::PreSpec;
 

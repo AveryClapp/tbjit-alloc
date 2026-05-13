@@ -50,6 +50,15 @@ struct SizeClass {
     uint32_t count{0};
 };
 
+// Tracks site-pair LIFO discipline for PairedStack detection. top_pair is
+// the dominant freeing site for this *allocating* site; lifo_count counts
+// frees that matched the top of lifo_stack at the time of the free.
+struct PairCandidate {
+    CallSiteID free_site{0};
+    uint32_t   pair_count{0};
+    uint32_t   lifo_count{0};
+};
+
 struct CallSiteSummary {
     CallSiteID  id{0};
     Phase       phase{Phase::PreSpec};
@@ -68,6 +77,10 @@ struct CallSiteSummary {
 
     SizeClass   classes[4];       // learned classes at specialization time
     uint8_t     class_count{0};
+
+    void*       lifo_stack[16];   // last 16 outstanding allocs from this site
+    uint8_t     lifo_head{0};
+    PairCandidate top_pair;       // dominant freeing site + LIFO matches
 
     ExactHistogram baseline;  // frozen at specialization time
     SizeWindow     post_window;

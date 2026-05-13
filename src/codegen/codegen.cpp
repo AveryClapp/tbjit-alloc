@@ -33,11 +33,15 @@ void* compile(const RoutineSpec& spec) {
     // MPSC routing already separates producer allocs from consumer frees.
     // MultiSizeFreeList likewise falls back to TLFreeList on the dominant
     // size — the per-site branch ladder over learned classes is future
-    // work (see analysis::CallSiteSummary::classes for the learned set).
+    // work. PairedStack falls back to BumpAlloc — the alloc fast path is
+    // identical; the LIFO-rewind free emitter and dual-site compile is
+    // future work (see analysis::CallSiteSummary::top_pair).
     Strategy effective = spec.strategy;
     if (effective == Strategy::ProducerConsumer ||
         effective == Strategy::MultiSizeFreeList)
         effective = Strategy::ThreadLocalFreeList;
+    if (effective == Strategy::PairedStack)
+        effective = Strategy::BumpAlloc;
     if (effective != Strategy::BumpAlloc &&
         effective != Strategy::ThreadLocalFreeList &&
         effective != Strategy::EpochArena) return nullptr;
