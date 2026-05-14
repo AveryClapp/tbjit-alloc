@@ -65,7 +65,10 @@ void* aligned_mmap_2mib() {
 
     DBG("aligned_mmap_2mib step5 returning aligned_lo=%lx\n",
         (unsigned long)aligned_lo);
-    return reinterpret_cast<void*>(aligned_lo);
+    marker("M:aligned-mmap-about-to-return\n");
+    void* ret_val = reinterpret_cast<void*>(aligned_lo);
+    marker("M:aligned-mmap-have-ret-val\n");
+    return ret_val;
 }
 
 } // namespace
