@@ -27,24 +27,34 @@ std::atomic<size_t>         g_index_count{0};
 pthread_mutex_t             g_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void* aligned_mmap_2mib() {
-    // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
-    // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
-    // and the kernel coalesces neighboring unmapped regions.
+    DBG("aligned_mmap_2mib step1 calling mmap\n");
     void* raw = mmap(nullptr, SEGMENT_SIZE * 2,
                      PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    DBG("aligned_mmap_2mib step2 mmap returned %p\n", raw);
     if (raw == MAP_FAILED) return nullptr;
 
     uintptr_t lo  = reinterpret_cast<uintptr_t>(raw);
     uintptr_t hi  = lo + SEGMENT_SIZE * 2;
     uintptr_t aligned_lo = (lo + SEGMENT_SIZE - 1) & SEGMENT_MASK;
     uintptr_t aligned_hi = aligned_lo + SEGMENT_SIZE;
+    DBG("aligned_mmap_2mib step3 lo=%lx hi=%lx aligned_lo=%lx aligned_hi=%lx\n",
+        (unsigned long)lo, (unsigned long)hi,
+        (unsigned long)aligned_lo, (unsigned long)aligned_hi);
 
-    if (aligned_lo != lo)
+    if (aligned_lo != lo) {
+        DBG("aligned_mmap_2mib step4a munmap leading raw=%p len=%lx\n",
+            raw, (unsigned long)(aligned_lo - lo));
         munmap(raw, aligned_lo - lo);
-    if (hi != aligned_hi)
+    }
+    if (hi != aligned_hi) {
+        DBG("aligned_mmap_2mib step4b munmap trailing addr=%lx len=%lx\n",
+            (unsigned long)aligned_hi, (unsigned long)(hi - aligned_hi));
         munmap(reinterpret_cast<void*>(aligned_hi), hi - aligned_hi);
+    }
 
+    DBG("aligned_mmap_2mib step5 returning aligned_lo=%lx\n",
+        (unsigned long)aligned_lo);
     return reinterpret_cast<void*>(aligned_lo);
 }
 
