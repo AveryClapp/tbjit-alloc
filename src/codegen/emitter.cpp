@@ -28,9 +28,12 @@ uint8_t* w64(uint8_t* p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
 //   cmp rax, 0                   ; ptr == 0 → uninitialized
 //   jne .deopt                   ; (rel8, patched later)
 // [.init]
+//   sub rsp, 8                   ; realign stack to 16 before external call
 //   mov edi, slot_index          ; arg0: slot index
+//   mov esi, dominant_size       ; arg1: size
 //   movabs rax, slow_init_fn
 //   call rax                     ; returns base ptr in rax
+//   add rsp, 8                   ; undo realignment
 //   ret
 //
 // [.deopt]  <-- both jne patches here
@@ -140,6 +143,12 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
 
     // --- .init label (falls through from .slow when rax==0) ---
 
+    // sub rsp, 8  (48 83 EC 08) — realign to 16 before external call: the
+    // JIT page is entered via `call` (RSP mod 16 == 8) and does no stack
+    // adjustment, so an inner `call` would land in the callee at
+    // RSP mod 16 == 0, violating the SysV ABI.
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xEC); p = w8(p, 0x08);
+
     // mov edi, slot_index  (BF <imm32>)
     p = w8(p, 0xBF);
     p = w32(p, slot_index);
@@ -157,6 +166,9 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
     // call rax  (FF D0)
     p = w8(p, 0xFF);
     p = w8(p, 0xD0);
+
+    // add rsp, 8  (48 83 C4 08) — undo the realignment before ret.
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xC4); p = w8(p, 0x08);
 
     // ret
     p = w8(p, 0xC3);
@@ -285,6 +297,9 @@ size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
     uint8_t* refill_label = p;
     *jz_refill_off = static_cast<uint8_t>(refill_label - (jz_refill_off + 1));
 
+    // sub rsp, 8 — realign to 16 before external call (see emit_bump_alloc).
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xEC); p = w8(p, 0x08);
+
     // mov edi, slot_index  (BF <imm32>)
     p = w8(p, 0xBF);
     p = w32(p, slot_index);
@@ -299,6 +314,9 @@ size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
 
     // call rax (FF D0)
     p = w8(p, 0xFF); p = w8(p, 0xD0);
+
+    // add rsp, 8 — undo the realignment.
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xC4); p = w8(p, 0x08);
 
     // ret
     p = w8(p, 0xC3);
@@ -424,6 +442,9 @@ size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
     uint8_t* reset_label = p;
     *jae_reset_off = static_cast<uint8_t>(reset_label - (jae_reset_off + 1));
 
+    // sub rsp, 8 — realign to 16 before external call (see emit_bump_alloc).
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xEC); p = w8(p, 0x08);
+
     // mov edi, slot_index
     p = w8(p, 0xBF);
     p = w32(p, slot_index);
@@ -438,6 +459,9 @@ size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
 
     // call rax
     p = w8(p, 0xFF); p = w8(p, 0xD0);
+
+    // add rsp, 8 — undo the realignment.
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xC4); p = w8(p, 0x08);
 
     // ret
     p = w8(p, 0xC3);
@@ -536,6 +560,8 @@ size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
         uint8_t* refill_label = p;
         *jz_refill = static_cast<uint8_t>(refill_label - (jz_refill + 1));
 
+        // sub rsp, 8 — realign to 16 before external call (see emit_bump_alloc).
+        p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xEC); p = w8(p, 0x08);
         // mov edi, slot_index
         p = w8(p, 0xBF); p = w32(p, slot_index);
         // mov esi, class_sizes[i]
@@ -547,6 +573,8 @@ size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
         p = w64(p, reinterpret_cast<uint64_t>(refill_fn));
         // call rax
         p = w8(p, 0xFF); p = w8(p, 0xD0);
+        // add rsp, 8 — undo the realignment.
+        p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xC4); p = w8(p, 0x08);
         // ret
         p = w8(p, 0xC3);
 
@@ -664,6 +692,8 @@ size_t emit_pc_alloc(uint8_t* buf, size_t buf_size,
     uint8_t* refill_label = p;
     *jae_refill = static_cast<uint8_t>(refill_label - (jae_refill + 1));
 
+    // sub rsp, 8 — realign to 16 before external call (see emit_bump_alloc).
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xEC); p = w8(p, 0x08);
     // mov edi, slot_index
     p = w8(p, 0xBF); p = w32(p, slot_index);
     // mov esi, dominant_size
@@ -673,6 +703,8 @@ size_t emit_pc_alloc(uint8_t* buf, size_t buf_size,
     p = w64(p, reinterpret_cast<uint64_t>(refill_fn));
     // call rax
     p = w8(p, 0xFF); p = w8(p, 0xD0);
+    // add rsp, 8 — undo the realignment.
+    p = w8(p, 0x48); p = w8(p, 0x83); p = w8(p, 0xC4); p = w8(p, 0x08);
     // ret
     p = w8(p, 0xC3);
 
