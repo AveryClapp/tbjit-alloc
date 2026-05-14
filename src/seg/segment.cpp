@@ -45,30 +45,11 @@ void* aligned_mmap_2mib() {
     if (raw == MAP_FAILED) return nullptr;
 
     uintptr_t lo  = reinterpret_cast<uintptr_t>(raw);
-    uintptr_t hi  = lo + SEGMENT_SIZE * 2;
     uintptr_t aligned_lo = (lo + SEGMENT_SIZE - 1) & SEGMENT_MASK;
-    uintptr_t aligned_hi = aligned_lo + SEGMENT_SIZE;
-    DBG("aligned_mmap_2mib step3 lo=%lx hi=%lx aligned_lo=%lx aligned_hi=%lx\n",
-        (unsigned long)lo, (unsigned long)hi,
-        (unsigned long)aligned_lo, (unsigned long)aligned_hi);
-
-    if (aligned_lo != lo) {
-        DBG("aligned_mmap_2mib step4a munmap leading raw=%p len=%lx\n",
-            raw, (unsigned long)(aligned_lo - lo));
-        munmap(raw, aligned_lo - lo);
-    }
-    if (hi != aligned_hi) {
-        DBG("aligned_mmap_2mib step4b munmap trailing addr=%lx len=%lx\n",
-            (unsigned long)aligned_hi, (unsigned long)(hi - aligned_hi));
-        munmap(reinterpret_cast<void*>(aligned_hi), hi - aligned_hi);
-    }
-
-    DBG("aligned_mmap_2mib step5 returning aligned_lo=%lx\n",
+    DBG("aligned_mmap_2mib step5 returning aligned_lo=%lx (no trim)\n",
         (unsigned long)aligned_lo);
-    marker("M:aligned-mmap-about-to-return\n");
-    void* ret_val = reinterpret_cast<void*>(aligned_lo);
-    marker("M:aligned-mmap-have-ret-val\n");
-    return ret_val;
+    marker("M:no-trim-about-to-return\n");
+    return reinterpret_cast<void*>(aligned_lo);
 }
 
 } // namespace
