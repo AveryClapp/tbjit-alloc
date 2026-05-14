@@ -8,8 +8,18 @@
 
 #ifdef TBJIT_DEBUG_JIT
 #define DBG(...) do { std::fprintf(stderr, "[tbjit-seg] " __VA_ARGS__); std::fflush(stderr); } while (0)
+// Raw syscall write — bypasses any libc state that might be wedged.
+static inline void marker(const char* m) {
+    long n = 0; for (const char* p = m; *p; ++p) ++n;
+    long ret;
+    __asm__ volatile("syscall"
+        : "=a"(ret) : "0"(1), "D"(2), "S"(m), "d"(n)
+        : "rcx", "r11", "memory");
+    (void)ret;
+}
 #else
 #define DBG(...) ((void)0)
+static inline void marker(const char*) {}
 #endif
 
 #if defined(__linux__)
@@ -90,10 +100,14 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size) {
     DBG("alloc_segment enter strategy=%u slot=%u site=%u sz=%u\n",
         static_cast<unsigned>(s), slot, site, chunk_size);
+    marker("M:pre-mmap2mib\n");
     void* mem = aligned_mmap_2mib();
+    marker("M:post-mmap2mib\n");
     DBG("alloc_segment after aligned_mmap_2mib mem=%p\n", mem);
+    marker("M:after-DBG\n");
     if (!mem) return nullptr;
     auto* h = static_cast<SegmentHeader*>(mem);
+    marker("M:about-to-write-header\n");
     h->strategy     = s;
     h->retired      = false;
     h->class_idx    = 0;
