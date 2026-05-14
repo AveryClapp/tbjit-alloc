@@ -2,31 +2,17 @@
 #include "tls.h"
 #include "seg/segment.h"
 #include <cassert>
-#include <cstdio>
-
-// TEMPORARY: diagnostic prints to localize the JIT-execution segfault on
-// Linux CI. Compile-time gated so the local build is unaffected. To be
-// removed once the root cause is identified.
-#ifdef TBJIT_DEBUG_JIT
-#define DBG(...) do { std::fprintf(stderr, "[tbjit] " __VA_ARGS__); std::fflush(stderr); } while (0)
-#else
-#define DBG(...) ((void)0)
-#endif
 
 namespace tbjit::codegen {
 
 uint8_t* bump_slow_init(uint32_t index, uint32_t size) {
-    DBG("bump_slow_init enter idx=%u size=%u\n", index, size);
     seg::SegmentHeader* s = seg::alloc_segment(
         Strategy::BumpAlloc, index, /*site=*/g_slot_to_site[index], size);
-    DBG("bump_slow_init seg=%p\n", static_cast<void*>(s));
     assert(s);
     uint8_t* base = seg::payload_start(s);
     tl_bumps[index].ptr = base + size;
     tl_bumps[index].end = seg::segment_end(s);
     s->bump_ptr  = base + size;
-    DBG("bump_slow_init exit base=%p ptr=%p end=%p\n",
-        base, tl_bumps[index].ptr, tl_bumps[index].end);
     return base;
 }
 

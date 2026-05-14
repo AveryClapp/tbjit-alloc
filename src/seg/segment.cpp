@@ -1,26 +1,9 @@
 #include "segment.h"
 #include <atomic>
 #include <cassert>
-#include <cstdio>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-#ifdef TBJIT_DEBUG_JIT
-#define DBG(...) do { std::fprintf(stderr, "[tbjit-seg] " __VA_ARGS__); std::fflush(stderr); } while (0)
-// Raw syscall write — bypasses any libc state that might be wedged.
-static inline void marker(const char* m) {
-    long n = 0; for (const char* p = m; *p; ++p) ++n;
-    long ret;
-    __asm__ volatile("syscall"
-        : "=a"(ret) : "0"(1), "D"(2), "S"(m), "d"(n)
-        : "rcx", "r11", "memory");
-    (void)ret;
-}
-#else
-#define DBG(...) ((void)0)
-static inline void marker(const char*) {}
-#endif
 
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -37,18 +20,24 @@ std::atomic<size_t>         g_index_count{0};
 pthread_mutex_t             g_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void* aligned_mmap_2mib() {
-    DBG("aligned_mmap_2mib step1 calling mmap\n");
+    // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
+    // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
+    // and the kernel coalesces neighboring unmapped regions.
     void* raw = mmap(nullptr, SEGMENT_SIZE * 2,
                      PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    DBG("aligned_mmap_2mib step2 mmap returned %p\n", raw);
     if (raw == MAP_FAILED) return nullptr;
 
     uintptr_t lo  = reinterpret_cast<uintptr_t>(raw);
+    uintptr_t hi  = lo + SEGMENT_SIZE * 2;
     uintptr_t aligned_lo = (lo + SEGMENT_SIZE - 1) & SEGMENT_MASK;
-    DBG("aligned_mmap_2mib step5 returning aligned_lo=%lx (no trim)\n",
-        (unsigned long)aligned_lo);
-    marker("M:no-trim-about-to-return\n");
+    uintptr_t aligned_hi = aligned_lo + SEGMENT_SIZE;
+
+    if (aligned_lo != lo)
+        munmap(raw, aligned_lo - lo);
+    if (hi != aligned_hi)
+        munmap(reinterpret_cast<void*>(aligned_hi), hi - aligned_hi);
+
     return reinterpret_cast<void*>(aligned_lo);
 }
 
@@ -82,16 +71,9 @@ void* mpsc_harvest(SegmentHeader* seg) {
 
 SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size) {
-    DBG("alloc_segment enter strategy=%u slot=%u site=%u sz=%u\n",
-        static_cast<unsigned>(s), slot, site, chunk_size);
-    marker("M:pre-mmap2mib\n");
     void* mem = aligned_mmap_2mib();
-    marker("M:post-mmap2mib\n");
-    DBG("alloc_segment after aligned_mmap_2mib mem=%p\n", mem);
-    marker("M:after-DBG\n");
     if (!mem) return nullptr;
     auto* h = static_cast<SegmentHeader*>(mem);
-    marker("M:about-to-write-header\n");
     h->strategy     = s;
     h->retired      = false;
     h->class_idx    = 0;
@@ -105,9 +87,7 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     h->bump_ptr     = payload_start(h);
     h->bump_limit   = segment_end(h);
     h->next_in_site = nullptr;
-    DBG("alloc_segment header init done; calling register\n");
     register_segment(h);
-    DBG("alloc_segment exit h=%p\n", static_cast<void*>(h));
     return h;
 }
 
