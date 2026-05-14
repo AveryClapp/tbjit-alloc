@@ -1,9 +1,16 @@
 #include "segment.h"
 #include <atomic>
 #include <cassert>
+#include <cstdio>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#ifdef TBJIT_DEBUG_JIT
+#define DBG(...) do { std::fprintf(stderr, "[tbjit-seg] " __VA_ARGS__); std::fflush(stderr); } while (0)
+#else
+#define DBG(...) ((void)0)
+#endif
 
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -71,7 +78,10 @@ void* mpsc_harvest(SegmentHeader* seg) {
 
 SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size) {
+    DBG("alloc_segment enter strategy=%u slot=%u site=%u sz=%u\n",
+        static_cast<unsigned>(s), slot, site, chunk_size);
     void* mem = aligned_mmap_2mib();
+    DBG("alloc_segment after aligned_mmap_2mib mem=%p\n", mem);
     if (!mem) return nullptr;
     auto* h = static_cast<SegmentHeader*>(mem);
     h->strategy     = s;
@@ -87,7 +97,9 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     h->bump_ptr     = payload_start(h);
     h->bump_limit   = segment_end(h);
     h->next_in_site = nullptr;
+    DBG("alloc_segment header init done; calling register\n");
     register_segment(h);
+    DBG("alloc_segment exit h=%p\n", static_cast<void*>(h));
     return h;
 }
 
