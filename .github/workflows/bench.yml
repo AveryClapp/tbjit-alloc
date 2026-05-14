@@ -1,0 +1,71 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'bench/**'
+      - 'test/integration/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/bench.yml'
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y cmake build-essential
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run benchmark suite
+        run: |
+          mkdir -p bench-out
+          bash bench/run_bench.sh build | tee bench-out/results.txt
+
+      - name: Capture per-workload TBJIT_DUMP (auto-strategy picker)
+        run: |
+          mkdir -p bench-out/dumps
+          for p in monomorphic arena mixed pulse bimodal lifo producer_consumer hold; do
+            bin=build/bench/bench_$p
+            [ -x "$bin" ] || { echo "skip $p: missing"; continue; }
+            LD_PRELOAD=$PWD/build/libtbjit.so TBJIT_DUMP=1 "$bin" \
+              > bench-out/dumps/${p}.stdout \
+              2> bench-out/dumps/${p}.dump
+          done
+
+      - name: Render results into job summary
+        run: |
+          {
+            echo "## Benchmark results"
+            echo
+            echo '```'
+            cat bench-out/results.txt
+            echo '```'
+            echo
+            echo "## Auto-picker decisions per workload"
+            for f in bench-out/dumps/*.dump; do
+              [ -s "$f" ] || continue
+              name=$(basename "$f" .dump)
+              echo
+              echo "### $name"
+              echo '```'
+              cat "$f"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: bench-out/
+          retention-days: 30

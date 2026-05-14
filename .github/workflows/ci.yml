@@ -24,14 +24,3 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
-
-      - name: Bench
-        if: success()
-        run: |
-          echo "::group::Benchmark suite (each pattern × each strategy)"
-          bash bench/run_bench.sh build || true
-          echo "::endgroup::"
-          echo "::group::int_jit_verified dump"
-          LD_PRELOAD=$PWD/build/libtbjit.so TBJIT_DUMP=1 \
-            $PWD/build/test/integration/int_hello 2>&1 || true
-          echo "::endgroup::"
