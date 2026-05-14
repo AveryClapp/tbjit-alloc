@@ -133,7 +133,22 @@ void advance_prespec(CallSiteSummary* s) {
             } else if (pc_pattern) {
                 s->candidate = Strategy::ProducerConsumer;
             } else if (s->windows[s->active].hist.is_monomorphic(0.95)) {
-                s->candidate = Strategy::BumpAlloc;
+                // BumpAlloc carves one segment per slot and deopts on
+                // exhaust — fatal for churn workloads (every alloc paired
+                // with a free): after SEGMENT_SIZE/dom_size allocs the
+                // site deopts, and after DEOPT_BLACKLIST_LIMIT cycles
+                // it's blacklisted forever, falling back to glibc. Only
+                // pick BumpAlloc when frees are rare (Hold); otherwise
+                // pick TLFreeList so frees recycle. TLFreeList needs at
+                // least a pointer-width chunk to thread the free list
+                // through; fall back to BumpAlloc below that.
+                uint32_t dom = s->windows[s->active].hist.dominant_size();
+                if (s->lifetime != LifetimeTag::Hold &&
+                    dom >= sizeof(void*)) {
+                    s->candidate = Strategy::ThreadLocalFreeList;
+                } else {
+                    s->candidate = Strategy::BumpAlloc;
+                }
             } else if (nclass >= 2) {
                 s->candidate = Strategy::MultiSizeFreeList;
             } else {
@@ -267,7 +282,8 @@ void process_event(const AllocEvent& ev) {
         // we scan summaries' lifo_stack tops looking for a match.
         CallSiteSummary* alloc_s = nullptr;
         seg::SegmentHeader* h = seg::of(ev.ptr);
-        if (seg::is_managed(h)) {
+        const bool seg_managed = seg::is_managed(h);
+        if (seg_managed) {
             alloc_s = find_or_create(h->alloc_site);
         } else {
             for (size_t i = 0; i < g_summary_count; ++i) {
@@ -283,6 +299,17 @@ void process_event(const AllocEvent& ev) {
 
         ++alloc_s->free_count;
         alloc_s->free_dist.record(ev.thread_id);
+
+        // JIT'd allocs never appear in the trace (trampoline only records
+        // on the generic branch), so their ptrs were never pushed onto
+        // lifo_stack — the LIFO match below can't fire for them. Updating
+        // pair_count from these frees without a matching lifo_count
+        // opportunity would skew the paired_pattern ratio on the next
+        // compile cycle (the bug that pushed monomorphic workloads from
+        // PairedStack into BumpAlloc → exhaust → blacklist). Skip top_pair
+        // updates for seg-managed frees; the next PreSpec cycle's
+        // alloc-side observations will drive the picker.
+        if (seg_managed) return;
 
         // Track dominant freeing site via Boyer-Moore majority.
         if (alloc_s->top_pair.pair_count == 0 ||
