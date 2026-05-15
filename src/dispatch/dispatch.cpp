@@ -31,6 +31,11 @@ Entry* find(CallSiteID id) {
 
 } // namespace
 
+// Initialized to 1 so a TLS inline cache that defaults to gen=0 always
+// misses on its first lookup (rather than accidentally returning an
+// uninitialized fn pointer).
+std::atomic<uint64_t> g_generation{1};
+
 void init() {
     g_table = static_cast<Entry*>(
         alloc::alloc(sizeof(Entry) * TABLE_SIZE, alignof(Entry)));
@@ -43,12 +48,15 @@ void install(CallSiteID id, RoutineFn fn) {
     assert(e);
     e->id = id;
     e->fn.store(fn, std::memory_order_release);
+    g_generation.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void revert(CallSiteID id) {
     Entry* e = find(id);
-    if (e && e->id == id)
+    if (e && e->id == id) {
         e->fn.store(nullptr, std::memory_order_release);
+        g_generation.fetch_add(1, std::memory_order_acq_rel);
+    }
 }
 
 RoutineFn lookup(CallSiteID id) {

@@ -36,6 +36,21 @@ thread_local bool     reentrancy_guard = false;
 // (it never did) so the every-32-mallocs cadence is the only check-in.
 thread_local uint32_t tl_safe_point_counter = 0;
 
+// Single-entry inline cache for dispatch::lookup. The vast majority of
+// hot programs hammer one (or a small set of) call site(s) in tight
+// loops; this skips the dispatch hash-table walk + atomic-acquire load
+// on every malloc when the previous lookup is still valid.
+// Validity check: the global dispatch generation hasn't changed since
+// we cached. dispatch bumps it on every install/revert (rare), so the
+// check is a single relaxed atomic load on the hot path.
+thread_local tbjit::CallSiteID        tl_ic_id  = 0;
+thread_local tbjit::dispatch::RoutineFn tl_ic_fn = nullptr;
+thread_local uint64_t                 tl_ic_gen = 0;
+// (dispatch::g_generation is initialized to 1, so the first read here
+// always mismatches tl_ic_gen and forces a real lookup. After that
+// every install/revert bumps the global generation and invalidates all
+// per-thread caches uniformly — no per-thread invalidation broadcast.)
+
 using free_fn = void (*)(void*);
 
 free_fn real_free = nullptr;
@@ -75,7 +90,16 @@ void* malloc(size_t size) {
     void* ra = __builtin_return_address(0);
     tbjit::CallSiteID id = tbjit::hash_return_addr(ra);
 
-    tbjit::dispatch::RoutineFn fn = tbjit::dispatch::lookup(id);
+    uint64_t cur_gen = tbjit::dispatch::generation();
+    tbjit::dispatch::RoutineFn fn;
+    if (__builtin_expect(id == tl_ic_id && cur_gen == tl_ic_gen, 1)) {
+        fn = tl_ic_fn;
+    } else {
+        fn = tbjit::dispatch::lookup(id);
+        tl_ic_id  = id;
+        tl_ic_fn  = fn;
+        tl_ic_gen = cur_gen;
+    }
     void* ptr;
     if (__builtin_expect(fn != nullptr, 1)) {
         g_jit_allocs.fetch_add(1, std::memory_order_relaxed);
