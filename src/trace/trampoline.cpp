@@ -27,7 +27,14 @@ std::atomic<uint64_t> g_generic_allocs{0};
 
 namespace {
 
-thread_local bool reentrancy_guard = false;
+thread_local bool     reentrancy_guard = false;
+// Sampled safe-point counter: marks a safe point every 32nd malloc. The
+// epoch reclaimer just needs threads to check in "often enough" for
+// pages-pending-reclamation to be freed eventually. Skipping the atomic
+// load+store on 31/32 calls drops a measurable slice of trampoline
+// overhead on tight alloc/free loops. Free does not mark a safe point
+// (it never did) so the every-32-mallocs cadence is the only check-in.
+thread_local uint32_t tl_safe_point_counter = 0;
 
 using free_fn = void (*)(void*);
 
@@ -62,7 +69,8 @@ void* malloc(size_t size) {
     if (!g_real_malloc) return nullptr;  // pre-init: dlsym not yet complete
     if (reentrancy_guard) return g_real_malloc(size);
     reentrancy_guard = true;
-    tbjit::deopt::mark_safe_point();
+    if ((++tl_safe_point_counter & 31) == 0)
+        tbjit::deopt::mark_safe_point();
 
     void* ra = __builtin_return_address(0);
     tbjit::CallSiteID id = tbjit::hash_return_addr(ra);
