@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace tbjit::seg { struct SegmentHeader; }
+
 namespace tbjit::codegen {
 
 constexpr size_t BUMP_REGION_SIZE     = 256 * 1024;
@@ -17,6 +19,19 @@ uint8_t* bump_slow_init(uint32_t index, uint32_t size);
 // differs. The free trampoline's PairedStack case keys off the tag to
 // rewind bump_ptr on a LIFO-matching free.
 uint8_t* paired_slow_init(uint32_t index, uint32_t size);
+
+// LIFO rewind for a PairedStack free. The JIT fast path reads and
+// writes tl_bumps[seg->slot_index].ptr — NOT seg->bump_ptr — so the
+// rewind must consult and update the TLS slot or it has no effect on
+// subsequent JIT allocs (which is what made PairedStack effectively
+// behave like BumpAlloc on churn workloads).
+//
+// Returns true if `ptr` was the most-recent alloc and the cursor was
+// rewound; false if the free violates LIFO and the chunk is dropped.
+// Caller is responsible for verifying seg->owner_tid matches the
+// current thread before invoking — cross-thread frees can't safely
+// touch the owner's TLS.
+bool paired_lifo_rewind(seg::SegmentHeader* seg, void* ptr);
 
 // ProducerConsumer refill: called from both initial alloc and bump-exhaust
 // slow paths. If a prior segment exists in tl_bumps[slot], retires it

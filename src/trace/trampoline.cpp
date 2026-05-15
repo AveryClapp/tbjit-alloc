@@ -5,6 +5,7 @@
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
 #include "codegen/tls.h"
+#include "codegen/slow_init.h"
 #include "seg/segment.h"
 #include "common.h"
 #include <atomic>
@@ -110,15 +111,15 @@ void free(void* ptr) {
                     }
                     break;
                 case tbjit::Strategy::PairedStack: {
-                    // LIFO rewind: if the freed ptr is exactly bump_ptr -
-                    // chunk_size, this was the most-recent alloc — rewind.
-                    // Otherwise the LIFO assumption is violated; drop the
-                    // chunk. Single-threaded by construction (detection
-                    // requires concentrated alloc/free on one site pair).
-                    uint8_t* rewound =
-                        s->bump_ptr - s->chunk_size;
-                    if (rewound == static_cast<uint8_t*>(ptr))
-                        s->bump_ptr = rewound;
+                    // LIFO rewind via the TLS slot the JIT fast path
+                    // actually reads — seg->bump_ptr alone is a stale
+                    // mirror and rewinding it wouldn't recycle the chunk.
+                    // Same-thread only: cross-thread frees can't touch
+                    // the owner's TLS. PairedStack's detection rule
+                    // requires concentrated alloc/free on one site pair,
+                    // so cross-thread frees are rare; drop those chunks.
+                    if (s->owner_tid == tbjit::seg::current_tid())
+                        tbjit::codegen::paired_lifo_rewind(s, ptr);
                     break;
                 }
                 case tbjit::Strategy::ThreadLocalFreeList: {

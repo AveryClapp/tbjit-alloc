@@ -61,10 +61,36 @@ static void test_lifo_violation_does_not_rewind() {
     CHECK(s->bump_ptr == base + 3 * 48); // bump unchanged
 }
 
+// paired_lifo_rewind rewinds tl_bumps[slot].ptr (what the JIT fast path
+// reads), not just s->bump_ptr (a mirror). Without this, JIT-served
+// PairedStack allocs never recycle: the segment exhausts and the site
+// deopts → blacklisted after 3 cycles, same as plain BumpAlloc.
+static void test_paired_lifo_rewind_updates_tls_slot() {
+    uint32_t idx = alloc_slot_index();
+    g_slot_to_site[idx] = 7777;
+    uint8_t* base = paired_slow_init(idx, 48);
+    seg::SegmentHeader* s = seg::of(base);
+
+    // Simulate the JIT fast path having served three allocs: it would
+    // have advanced fs:[ptr_off] (= tl_bumps[idx].ptr) without ever
+    // touching s->bump_ptr.
+    tl_bumps[idx].ptr = base + 4 * 48;  // returned chunks 0..3
+
+    // Top-of-stack free → rewind the TLS slot.
+    CHECK(paired_lifo_rewind(s, base + 3 * 48));
+    CHECK(tl_bumps[idx].ptr == base + 3 * 48);
+    CHECK(s->bump_ptr       == base + 3 * 48);  // mirror updated
+
+    // Out-of-order free → no rewind, slot unchanged.
+    CHECK(!paired_lifo_rewind(s, base + 0 * 48));
+    CHECK(tl_bumps[idx].ptr == base + 3 * 48);
+}
+
 int main() {
     test_paired_slow_init_tags_segment();
     test_lifo_rewind_matches_top_alloc();
     test_lifo_violation_does_not_rewind();
+    test_paired_lifo_rewind_updates_tls_slot();
     std::puts("test_paired_stack_codegen OK");
     return 0;
 }

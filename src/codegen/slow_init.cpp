@@ -63,6 +63,15 @@ uint8_t* paired_slow_init(uint32_t index, uint32_t size) {
     return base;
 }
 
+bool paired_lifo_rewind(seg::SegmentHeader* s, void* ptr) {
+    BumpSlot& slot = tl_bumps[s->slot_index];
+    uint8_t* rewound = slot.ptr - s->chunk_size;
+    if (rewound != static_cast<uint8_t*>(ptr)) return false;
+    slot.ptr    = rewound;
+    s->bump_ptr = rewound;
+    return true;
+}
+
 void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 
