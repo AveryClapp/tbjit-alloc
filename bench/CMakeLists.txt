@@ -23,5 +23,15 @@ add_bench(bench_producer_consumer producer_consumer.cpp)
 target_link_libraries(bench_producer_consumer PRIVATE pthread)
 add_bench(bench_hold            hold.cpp)
 
+# Direct-call microbench: links against tbjit_obj to call codegen::compile
+# and invoke the emitted routine without going through the LD_PRELOAD
+# trampoline. Isolates the JIT inner-loop cost from interposition overhead.
+add_executable(bench_micro_jit_direct micro_jit_direct.cpp)
+target_compile_options(bench_micro_jit_direct PRIVATE
+  -O2 -fno-exceptions -fno-rtti)
+target_include_directories(bench_micro_jit_direct PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(bench_micro_jit_direct PRIVATE tbjit_obj)
+
 # Legacy alias — older docs/scripts referenced bench_throughput.
 add_custom_target(bench_throughput DEPENDS bench_monomorphic)

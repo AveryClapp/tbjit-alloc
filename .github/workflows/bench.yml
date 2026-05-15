@@ -31,6 +31,10 @@ jobs:
           mkdir -p bench-out
           bash bench/run_bench.sh build | tee bench-out/results.txt
 
+      - name: Run direct-call microbench (no LD_PRELOAD trampoline)
+        run: |
+          build/bench/bench_micro_jit_direct | tee bench-out/micro.txt
+
       - name: Capture per-workload TBJIT_DUMP (auto-strategy picker)
         run: |
           mkdir -p bench-out/dumps
@@ -49,6 +53,12 @@ jobs:
             echo
             echo '```'
             cat bench-out/results.txt
+            echo '```'
+            echo
+            echo "## Direct-call microbench (no trampoline)"
+            echo
+            echo '```'
+            cat bench-out/micro.txt
             echo '```'
             echo
             echo "## Auto-picker decisions per workload"
