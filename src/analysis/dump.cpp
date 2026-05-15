@@ -48,22 +48,31 @@ const char* phase_name(Phase p, bool blacklisted) {
 }
 
 void print_per_site_table(FILE* out) {
-    fprintf(out, "\n%-18s %10s %6s %6s %6s  %-12s  %s\n",
-            "CALL SITE", "EVENTS", "P50", "P95", "P99", "PHASE", "STRATEGY");
-    fprintf(out, "%-18s %10s %6s %6s %6s  %-12s  %s\n",
-            "----------", "------", "---", "---", "---", "-----", "--------");
+    fprintf(out, "\n%-18s %10s %6s %6s %6s  %10s  %-12s  %s\n",
+            "CALL SITE", "EVENTS", "P50", "P95", "P99",
+            "JIT@EVENTS", "PHASE", "STRATEGY");
+    fprintf(out, "%-18s %10s %6s %6s %6s  %10s  %-12s  %s\n",
+            "----------", "------", "---", "---", "---",
+            "----------", "-----", "--------");
 
     for (size_t i = 0; i < g_summary_count; ++i) {
         const CallSiteSummary& s = g_summaries[i];
         const ExactHistogram& h  = (s.phase == Phase::Compiled)
                                    ? s.baseline
                                    : s.windows[s.active].hist;
-        fprintf(out, "0x%-16lx %10lu %6u %6u %6u  %-12s  %s\n",
+        char first_compile[16];
+        if (s.first_compile_events == 0)
+            std::snprintf(first_compile, sizeof first_compile, "-");
+        else
+            std::snprintf(first_compile, sizeof first_compile, "%lu",
+                static_cast<unsigned long>(s.first_compile_events));
+        fprintf(out, "0x%-16lx %10lu %6u %6u %6u  %10s  %-12s  %s\n",
                 static_cast<unsigned long>(s.id),
                 static_cast<unsigned long>(s.event_count),
                 h.quantile(0.50),
                 h.quantile(0.95),
                 h.quantile(0.99),
+                first_compile,
                 phase_name(s.phase, s.blacklisted),
                 strategy_name(s.candidate));
     }
@@ -133,6 +142,36 @@ void print_summary(FILE* out, const Summary& sum) {
     fprintf(out, "  PreSpec:           %zu (%.1f%%)\n", sum.prespec,   pct(sum.prespec));
     fprintf(out, "Total events:        %llu (%.1f%% via JIT)\n",
             static_cast<unsigned long long>(tot), jit_pct);
+
+    // Time-to-specialize distribution across compiled sites.
+    if (sum.compiled > 0) {
+        // 4096 × 8 bytes = 32 KiB on the stack — safely within frame
+        // limits; mirrors MAX_CALL_SITES in analysis.cpp.
+        uint64_t fces[4096];
+        size_t n = 0;
+        for (size_t i = 0; i < g_summary_count; ++i) {
+            const CallSiteSummary& s = g_summaries[i];
+            if (s.first_compile_events != 0) fces[n++] = s.first_compile_events;
+        }
+        // Simple insertion sort — n is bounded by MAX_CALL_SITES (4096) and
+        // typically far smaller; not worth pulling in <algorithm> here.
+        for (size_t i = 1; i < n; ++i) {
+            uint64_t v = fces[i]; size_t j = i;
+            while (j > 0 && fces[j - 1] > v) { fces[j] = fces[j - 1]; --j; }
+            fces[j] = v;
+        }
+        uint64_t fce_p50 = n ? fces[n / 2] : 0;
+        uint64_t fce_p95 = n ? fces[(n * 95) / 100] : 0;
+        uint64_t fce_min = n ? fces[0] : 0;
+        uint64_t fce_max = n ? fces[n - 1] : 0;
+        fprintf(out,
+                "Events-to-specialize: min=%llu  p50=%llu  p95=%llu  max=%llu  (n=%zu)\n",
+                static_cast<unsigned long long>(fce_min),
+                static_cast<unsigned long long>(fce_p50),
+                static_cast<unsigned long long>(fce_p95),
+                static_cast<unsigned long long>(fce_max),
+                n);
+    }
 
     fprintf(out, "\n=== Strategy distribution (compiled sites) ===\n");
     for (unsigned si = 0; si < 7; ++si) {
@@ -205,7 +244,7 @@ void write_json_dump(const char* path, const Summary& sum) {
                 "\"p50\": %u, \"p95\": %u, \"p99\": %u, "
                 "\"phase\": \"%s\", \"strategy\": \"%s\", "
                 "\"lifetime\": \"%s\", \"deopts\": %u, "
-                "\"blacklisted\": %s}%s\n",
+                "\"blacklisted\": %s, \"first_compile_events\": %lu}%s\n",
                 static_cast<unsigned long>(s.id),
                 static_cast<unsigned long>(s.event_count),
                 static_cast<unsigned long>(s.free_count),
@@ -215,6 +254,7 @@ void write_json_dump(const char* path, const Summary& sum) {
                 lifetime_name(s.lifetime),
                 s.deopt_count,
                 s.blacklisted ? "true" : "false",
+                static_cast<unsigned long>(s.first_compile_events),
                 (i + 1 == g_summary_count) ? "" : ",");
     }
     fprintf(j, "  ]\n");

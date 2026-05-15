@@ -68,6 +68,10 @@ struct CallSiteSummary {
     uint32_t    deopt_count{0};      // total deopts seen; blacklist threshold
     bool        blacklisted{false};  // true → never recompile this site
     LifetimeTag lifetime{LifetimeTag::Unknown};
+    uint64_t    first_compile_events{0};  // event_count when this site first
+                                          // reached Compiled. 0 = never
+                                          // compiled. Latency-to-specialize
+                                          // metric for paper analysis.
 
     ThreadDist  alloc_dist;
     ThreadDist  free_dist;

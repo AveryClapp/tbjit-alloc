@@ -155,6 +155,8 @@ void advance_prespec(CallSiteSummary* s) {
                 s->candidate = Strategy::ThreadLocalFreeList;
             }
             s->phase = Phase::Compiled;
+            if (s->first_compile_events == 0)
+                s->first_compile_events = s->event_count;
             {
                 codegen::RoutineSpec spec{};
                 spec.id       = s->id;
