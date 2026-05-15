@@ -38,6 +38,19 @@ void* aligned_mmap_2mib() {
     if (hi != aligned_hi)
         munmap(reinterpret_cast<void*>(aligned_hi), hi - aligned_hi);
 
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    // Hint the kernel to back this region with a transparent hugepage.
+    // The surviving range is naturally 2-MiB-aligned (== x86-64 large page
+    // size) so a single THP can cover the entire segment, dropping TLB
+    // pressure on alloc-heavy workloads. mimalloc does this; we didn't,
+    // and the `hold` bench gap (mimalloc 6.9 ns vs ours ~87 ns/op tracked
+    // closely with TLB-miss cost) is what this targets. madvise is
+    // best-effort: if THP is disabled at the kernel level, the segment
+    // stays backed by 4 KiB pages, no harm done.
+    (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
+                   MADV_HUGEPAGE);
+#endif
+
     return reinterpret_cast<void*>(aligned_lo);
 }
 
