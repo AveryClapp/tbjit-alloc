@@ -2,6 +2,8 @@
 #include "analysis/histogram.h"
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 // Counters defined at global scope in trampoline.cpp.
 extern std::atomic<uint64_t> g_jit_allocs;
@@ -16,41 +18,219 @@ namespace tbjit::analysis {
 extern CallSiteSummary* g_summaries;
 extern size_t           g_summary_count;
 
-void dump_stats() {
-    fprintf(stderr, "\n%-18s %10s %6s %6s %6s  %-10s  %s\n",
-            "CALL SITE", "EVENTS", "P50", "P95", "P99", "STABLE", "STRATEGY");
-    fprintf(stderr, "%-18s %10s %6s %6s %6s  %-10s  %s\n",
-            "----------", "------", "---", "---", "---", "------", "--------");
+namespace {
+
+const char* strategy_name(Strategy s) {
+    switch (s) {
+        case Strategy::BumpAlloc:           return "BumpAlloc";
+        case Strategy::ThreadLocalFreeList: return "TLFreeList";
+        case Strategy::EpochArena:          return "EpochArena";
+        case Strategy::PairedStack:         return "PairedStack";
+        case Strategy::ProducerConsumer:    return "ProducerConsumer";
+        case Strategy::MultiSizeFreeList:   return "MultiSizeFreeList";
+        default:                            return "-";
+    }
+}
+
+const char* lifetime_name(LifetimeTag t) {
+    switch (t) {
+        case LifetimeTag::Reap:    return "Reap";
+        case LifetimeTag::Hold:    return "Hold";
+        default:                   return "Unknown";
+    }
+}
+
+const char* phase_name(Phase p, bool blacklisted) {
+    if (blacklisted)            return "Blacklisted";
+    if (p == Phase::Compiled)   return "Compiled";
+    if (p == Phase::Deopt)      return "Deopt";
+    return "PreSpec";
+}
+
+void print_per_site_table(FILE* out) {
+    fprintf(out, "\n%-18s %10s %6s %6s %6s  %-12s  %s\n",
+            "CALL SITE", "EVENTS", "P50", "P95", "P99", "PHASE", "STRATEGY");
+    fprintf(out, "%-18s %10s %6s %6s %6s  %-12s  %s\n",
+            "----------", "------", "---", "---", "---", "-----", "--------");
 
     for (size_t i = 0; i < g_summary_count; ++i) {
         const CallSiteSummary& s = g_summaries[i];
         const ExactHistogram& h  = (s.phase == Phase::Compiled)
                                    ? s.baseline
                                    : s.windows[s.active].hist;
-
-        const char* stable = (s.phase == Phase::Compiled) ? "YES" : "NO";
-        const char* strategy;
-        switch (s.candidate) {
-            case Strategy::BumpAlloc:           strategy = "BumpAlloc";   break;
-            case Strategy::ThreadLocalFreeList: strategy = "TLFreeList";  break;
-            case Strategy::EpochArena:          strategy = "EpochArena";  break;
-            case Strategy::PairedStack:         strategy = "PairedStack"; break;
-            default:                            strategy = "-";            break;
-        }
-
-        fprintf(stderr, "0x%-16lx %10lu %6u %6u %6u  %-10s  %s\n",
+        fprintf(out, "0x%-16lx %10lu %6u %6u %6u  %-12s  %s\n",
                 static_cast<unsigned long>(s.id),
                 static_cast<unsigned long>(s.event_count),
                 h.quantile(0.50),
                 h.quantile(0.95),
                 h.quantile(0.99),
-                stable, strategy);
+                phase_name(s.phase, s.blacklisted),
+                strategy_name(s.candidate));
     }
+}
 
-    fprintf(stderr, "\njit_allocs:     %lu\n",
-            static_cast<unsigned long>(g_jit_allocs.load(std::memory_order_relaxed)));
-    fprintf(stderr, "generic_allocs: %lu\n",
-            static_cast<unsigned long>(g_generic_allocs.load(std::memory_order_relaxed)));
+struct Summary {
+    size_t total      = 0;
+    size_t compiled   = 0;
+    size_t blacklist  = 0;
+    size_t prespec    = 0;
+    size_t deopt      = 0;
+    size_t by_strategy[7] = {};   // index by Strategy enum value
+    size_t by_lifetime[3] = {};   // index by LifetimeTag enum value
+    uint64_t total_events = 0;
+    uint64_t total_frees  = 0;
+};
+
+Summary build_summary() {
+    Summary out;
+    for (size_t i = 0; i < g_summary_count; ++i) {
+        const CallSiteSummary& s = g_summaries[i];
+        ++out.total;
+        out.total_events += s.event_count;
+        out.total_frees  += s.free_count;
+        if (s.blacklisted)                 ++out.blacklist;
+        else if (s.phase == Phase::Compiled) ++out.compiled;
+        else if (s.phase == Phase::Deopt)    ++out.deopt;
+        else                                  ++out.prespec;
+        if (s.phase == Phase::Compiled && !s.blacklisted) {
+            unsigned si = static_cast<unsigned>(s.candidate);
+            if (si < 7) ++out.by_strategy[si];
+            unsigned li = static_cast<unsigned>(s.lifetime);
+            if (li < 3) ++out.by_lifetime[li];
+        }
+    }
+    return out;
+}
+
+void print_summary(FILE* out, const Summary& sum) {
+    auto pct = [&](size_t n) {
+        return sum.total == 0 ? 0.0 : 100.0 * static_cast<double>(n) /
+                                     static_cast<double>(sum.total);
+    };
+    auto pct_of_compiled = [&](size_t n) {
+        return sum.compiled == 0 ? 0.0 : 100.0 * static_cast<double>(n) /
+                                        static_cast<double>(sum.compiled);
+    };
+    uint64_t jit_n = g_jit_allocs.load(std::memory_order_relaxed);
+    uint64_t gen_n = g_generic_allocs.load(std::memory_order_relaxed);
+    uint64_t tot   = jit_n + gen_n;
+    double jit_pct = tot == 0 ? 0.0
+                              : 100.0 * static_cast<double>(jit_n) /
+                                        static_cast<double>(tot);
+
+    // Legacy lines first — kept as-is for the integration test regexes
+    // and any external tools that grep for these tokens.
+    fprintf(out, "\njit_allocs:     %llu\n",
+            static_cast<unsigned long long>(jit_n));
+    fprintf(out, "generic_allocs: %llu\n",
+            static_cast<unsigned long long>(gen_n));
+
+    fprintf(out, "\n=== Summary ===\n");
+    fprintf(out, "Sites observed:      %zu\n", sum.total);
+    fprintf(out, "  Compiled:          %zu (%.1f%%)\n", sum.compiled, pct(sum.compiled));
+    fprintf(out, "  Blacklisted:       %zu (%.1f%%)\n", sum.blacklist, pct(sum.blacklist));
+    fprintf(out, "  Deopt:             %zu (%.1f%%)\n", sum.deopt,     pct(sum.deopt));
+    fprintf(out, "  PreSpec:           %zu (%.1f%%)\n", sum.prespec,   pct(sum.prespec));
+    fprintf(out, "Total events:        %llu (%.1f%% via JIT)\n",
+            static_cast<unsigned long long>(tot), jit_pct);
+
+    fprintf(out, "\n=== Strategy distribution (compiled sites) ===\n");
+    for (unsigned si = 0; si < 7; ++si) {
+        if (sum.by_strategy[si] == 0) continue;
+        fprintf(out, "  %-20s %zu (%.1f%%)\n",
+                strategy_name(static_cast<Strategy>(si)),
+                sum.by_strategy[si],
+                pct_of_compiled(sum.by_strategy[si]));
+    }
+    fprintf(out, "\n=== Lifetime distribution (compiled sites) ===\n");
+    for (unsigned li = 0; li < 3; ++li) {
+        if (sum.by_lifetime[li] == 0) continue;
+        fprintf(out, "  %-20s %zu (%.1f%%)\n",
+                lifetime_name(static_cast<LifetimeTag>(li)),
+                sum.by_lifetime[li],
+                pct_of_compiled(sum.by_lifetime[li]));
+    }
+}
+
+// Optional structured-output sink for downstream paper-analysis scripts.
+// Activated via env TBJIT_DUMP_JSON=/path/to/file.json. Emits a single
+// JSON object: { meta:{...}, summary:{...}, sites:[...] }.
+void write_json_dump(const char* path, const Summary& sum) {
+    FILE* j = std::fopen(path, "w");
+    if (!j) return;
+    uint64_t jit_n = g_jit_allocs.load(std::memory_order_relaxed);
+    uint64_t gen_n = g_generic_allocs.load(std::memory_order_relaxed);
+    fprintf(j, "{\n");
+    fprintf(j, "  \"summary\": {\n");
+    fprintf(j, "    \"sites_observed\": %zu,\n", sum.total);
+    fprintf(j, "    \"compiled\": %zu,\n", sum.compiled);
+    fprintf(j, "    \"blacklisted\": %zu,\n", sum.blacklist);
+    fprintf(j, "    \"deopt\": %zu,\n", sum.deopt);
+    fprintf(j, "    \"prespec\": %zu,\n", sum.prespec);
+    fprintf(j, "    \"jit_allocs\": %llu,\n",
+            static_cast<unsigned long long>(jit_n));
+    fprintf(j, "    \"generic_allocs\": %llu,\n",
+            static_cast<unsigned long long>(gen_n));
+    fprintf(j, "    \"strategy_counts\": {");
+    bool first = true;
+    for (unsigned si = 0; si < 7; ++si) {
+        if (sum.by_strategy[si] == 0) continue;
+        fprintf(j, "%s\"%s\": %zu",
+                first ? "" : ", ",
+                strategy_name(static_cast<Strategy>(si)),
+                sum.by_strategy[si]);
+        first = false;
+    }
+    fprintf(j, "},\n");
+    fprintf(j, "    \"lifetime_counts\": {");
+    first = true;
+    for (unsigned li = 0; li < 3; ++li) {
+        if (sum.by_lifetime[li] == 0) continue;
+        fprintf(j, "%s\"%s\": %zu",
+                first ? "" : ", ",
+                lifetime_name(static_cast<LifetimeTag>(li)),
+                sum.by_lifetime[li]);
+        first = false;
+    }
+    fprintf(j, "}\n");
+    fprintf(j, "  },\n");
+    fprintf(j, "  \"sites\": [\n");
+    for (size_t i = 0; i < g_summary_count; ++i) {
+        const CallSiteSummary& s = g_summaries[i];
+        const ExactHistogram& h  = (s.phase == Phase::Compiled)
+                                   ? s.baseline
+                                   : s.windows[s.active].hist;
+        fprintf(j,
+                "    {\"id\": %lu, \"events\": %lu, \"frees\": %lu, "
+                "\"p50\": %u, \"p95\": %u, \"p99\": %u, "
+                "\"phase\": \"%s\", \"strategy\": \"%s\", "
+                "\"lifetime\": \"%s\", \"deopts\": %u, "
+                "\"blacklisted\": %s}%s\n",
+                static_cast<unsigned long>(s.id),
+                static_cast<unsigned long>(s.event_count),
+                static_cast<unsigned long>(s.free_count),
+                h.quantile(0.50), h.quantile(0.95), h.quantile(0.99),
+                phase_name(s.phase, s.blacklisted),
+                strategy_name(s.candidate),
+                lifetime_name(s.lifetime),
+                s.deopt_count,
+                s.blacklisted ? "true" : "false",
+                (i + 1 == g_summary_count) ? "" : ",");
+    }
+    fprintf(j, "  ]\n");
+    fprintf(j, "}\n");
+    std::fclose(j);
+}
+
+} // namespace
+
+void dump_stats() {
+    print_per_site_table(stderr);
+    Summary sum = build_summary();
+    print_summary(stderr, sum);
+
+    if (const char* path = std::getenv("TBJIT_DUMP_JSON"))
+        write_json_dump(path, sum);
 }
 
 } // namespace tbjit::analysis
