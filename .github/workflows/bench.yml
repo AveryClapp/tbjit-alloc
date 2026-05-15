@@ -18,7 +18,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y cmake build-essential
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential \
+            libmimalloc-dev libjemalloc-dev
 
       - name: Configure (Release)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -34,6 +37,10 @@ jobs:
       - name: Run direct-call microbench (no LD_PRELOAD trampoline)
         run: |
           build/bench/bench_micro_jit_direct | tee bench-out/micro.txt
+
+      - name: Allocator comparison (glibc vs mimalloc vs jemalloc vs tbjit)
+        run: |
+          bash bench/run_alloc_comparison.sh build | tee bench-out/comparison.txt
 
       - name: Capture per-workload TBJIT_DUMP (auto-strategy picker)
         run: |
@@ -53,6 +60,12 @@ jobs:
             echo
             echo '```'
             cat bench-out/results.txt
+            echo '```'
+            echo
+            echo "## Allocator comparison (steady-state ns/op)"
+            echo
+            echo '```'
+            cat bench-out/comparison.txt
             echo '```'
             echo
             echo "## Direct-call microbench (no trampoline)"
