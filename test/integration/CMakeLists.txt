@@ -78,4 +78,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(int_arena_verified PROPERTIES
     PASS_REGULAR_EXPRESSION "EpochArena;jit_allocs:[ \t]*[1-9][0-9]*"
   )
+
+  # Determinism: two runs of int_hello under tbjit should produce the
+  # same picker fingerprint (strategy_counts + lifetime_counts +
+  # compiled / blacklisted totals). Phase 3a.1 of the paper roadmap;
+  # the picker has to be reproducible over the same trace, otherwise
+  # the paper's claims aren't.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_FOUND)
+    add_test(
+      NAME int_determinism
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/check_determinism.py
+        $<TARGET_FILE:tbjit>
+        $<TARGET_FILE:int_hello>
+    )
+  endif()
 endif()
