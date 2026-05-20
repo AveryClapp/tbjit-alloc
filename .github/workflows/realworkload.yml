@@ -1,0 +1,86 @@
+name: Real-workload bench
+
+# Phase 1 of the paper roadmap (docs/plans/2026-05-15-paper-roadmap.md):
+# run the LD_PRELOAD'd tbjit allocator against a handful of real
+# programs (compile passes, git log, cmake configure, the tbjit test
+# suite itself) so we can characterize the picker's behavior on
+# non-synthetic traces. This is the workflow that converts
+# "synthetic-bench characterization" into "paper-worthy empirical
+# evidence" and feeds phase1-results.md.
+#
+# Scheduled weekly because the suite is slower than the per-push bench
+# and we don't need real-workload data on every commit. workflow_dispatch
+# kept so we can fire it manually after the runner changes.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Sundays at 06:00 UTC. Light traffic on shared runners; gives the
+    # workweek to look at the previous run's artifact.
+    - cron: '0 6 * * 0'
+  push:
+    branches: [main]
+    paths:
+      - 'bench/realworkload/**'
+      - 'tools/analyze_dumps.py'
+      - '.github/workflows/realworkload.yml'
+
+jobs:
+  realworkload:
+    runs-on: ubuntu-latest
+    # The suite includes cmake_configure (~5s) and tbjit_self_tests
+    # (variable), plus future heavier workloads (gcc, sqlite). Budget
+    # generously now so a slow week doesn't kill the run.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git_log workload exercises history; need enough depth to
+          # produce a non-trivial walk. fetch-depth: 0 grabs everything.
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential \
+            libmimalloc-dev libjemalloc-dev
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run real-workload suite
+        run: |
+          mkdir -p bench-out
+          bash bench/realworkload/run_suite.sh bench-out/realworkload \
+            | tee bench-out/realworkload-run.log
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## Real-workload manifest"
+            echo
+            echo '| workload | allocator | wall (ms) | RSS (kB) | exit |'
+            echo '|---|---|---:|---:|---:|'
+            tail -n +2 bench-out/realworkload/manifest.tsv \
+              | awk -F'\t' '{printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5}'
+            echo
+            if [ -s bench-out/realworkload/aggregate.md ]; then
+              echo "## Picker aggregate"
+              echo
+              cat bench-out/realworkload/aggregate.md
+            else
+              echo "_no tbjit JSON dumps produced — picker aggregate unavailable_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: realworkload-${{ github.sha }}
+          path: bench-out/realworkload/
+          retention-days: 90
