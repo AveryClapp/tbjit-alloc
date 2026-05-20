@@ -27,6 +27,19 @@ std::atomic<uint64_t> g_generic_allocs{0};
 
 namespace {
 
+// Shutdown gate. The __attribute__((destructor)) chain joins the
+// analysis thread and dumps stats — but libc atexit handlers and other
+// shared-library destructors can still call malloc/free *after* our
+// destructor returns. Those calls would otherwise crash on torn-down
+// state (e.g. shadow/dispatch/segment internals that the dump touched).
+// Setting g_shutting_down at the start of tbjit_fini routes every
+// post-fini malloc/free directly to libc, sidestepping our trampoline.
+//
+// Picker observations stop at fini, which is correct: the workload is
+// over and any allocations after that are libc/runtime teardown, not
+// program behavior we want to characterize.
+std::atomic<bool> g_shutting_down{false};
+
 thread_local bool     reentrancy_guard = false;
 // Sampled safe-point counter: marks a safe point every 32nd malloc. The
 // epoch reclaimer just needs threads to check in "often enough" for
@@ -70,6 +83,11 @@ void tbjit_init() {
 
 __attribute__((destructor))
 void tbjit_fini() {
+    // Stop interposing BEFORE we tear anything down — any malloc/free
+    // running concurrently (or queued in a later atexit handler) sees
+    // the gate and routes straight to libc, avoiding races on the
+    // analysis/dispatch/segment state we're about to dismantle.
+    g_shutting_down.store(true, std::memory_order_release);
     tbjit::analysis::stop_background_thread();
     tbjit::trace::writer_close();
     if (getenv("TBJIT_DUMP"))
@@ -82,6 +100,8 @@ extern "C" {
 
 void* malloc(size_t size) {
     if (!g_real_malloc) return nullptr;  // pre-init: dlsym not yet complete
+    if (g_shutting_down.load(std::memory_order_acquire))
+        return g_real_malloc(size);       // post-fini: bypass torn-down state
     if (reentrancy_guard) return g_real_malloc(size);
     reentrancy_guard = true;
     if ((++tl_safe_point_counter & 31) == 0)
@@ -116,6 +136,16 @@ void* malloc(size_t size) {
 }
 
 void free(void* ptr) {
+    if (g_shutting_down.load(std::memory_order_acquire)) {
+        // Post-fini: can't safely consult segment/dispatch state. If ptr
+        // came from a tbjit-managed segment the underlying mmap'd region
+        // is still mapped (segments don't munmap on shutdown), so libc's
+        // free would crash on the unfamiliar pointer — drop those frees.
+        // Frees of libc-owned pointers go straight to libc.
+        if (ptr && tbjit::seg::is_managed(tbjit::seg::of(ptr))) return;
+        real_free(ptr);
+        return;
+    }
     if (reentrancy_guard || !real_free) { real_free(ptr); return; }
     reentrancy_guard = true;
 
