@@ -100,6 +100,98 @@ def aggregate_blacklist_reasons(dumps):
     return counts
 
 
+# Static taxonomy mapping each strategy's exhaustion / deopt mode to the
+# allocation-pattern story that most plausibly caused it. Used by the
+# failure-mode aggregation below to give reviewers a categorization to
+# chew on without us having to thread real reason codes through the JIT
+# (which would touch every emitter — deferred per Phase 3a.4).
+#
+# Calibrate this table from actual observations as Phase 1 data comes in;
+# the table is the analyzer's interpretation, not a ground truth.
+FAILURE_MODE_BY_STRATEGY = {
+    "BumpAlloc":           ("Hold misclass",
+        "Segment exhausted: site classified Reap but allocations live "
+        "long enough to fill the segment"),
+    "ThreadLocalFreeList": ("Freelist drain",
+        "Freelist depleted faster than refilled: allocations outpace "
+        "frees by enough to defeat the refill path"),
+    "MultiSizeFreeList":   ("Class drift",
+        "Multi-class miss rate too high: observed size distribution "
+        "drifted off the top-K modes picker locked in"),
+    "EpochArena":          ("Reclamation lag",
+        "Epoch reclamation can't catch up: allocations outpace the "
+        "drain rate, region fills before a safe point arrives"),
+    "PairedStack":         ("LIFO violation",
+        "Stack discipline broken: alloc/free pair detection was a false "
+        "positive — site doesn't actually free in LIFO order"),
+    "ProducerConsumer":    ("MPSC backpressure",
+        "Consumer-side reclaim can't keep up with producer: refill path "
+        "drains too slowly and the active segment exhausts"),
+    "Generic":             ("Direct fallback",
+        "Site fell back to the generic path without ever compiling — "
+        "candidate strategy didn't qualify under any picker rule"),
+}
+
+
+def failure_mode_aggregate(dumps):
+    """Group blacklisted sites by inferred failure mode.
+
+    Returns a Counter of (short_label, long_explanation) → count.
+    Sites whose strategy is missing from the taxonomy bucket into
+    ("Unknown", "no taxonomy entry") so the table doesn't silently
+    drop them as new strategies get added.
+    """
+    counts = Counter()
+    unknown = ("Unknown", "no taxonomy entry for this strategy")
+    for d in dumps.values():
+        for site in d.get("sites", []):
+            if not site.get("blacklisted"):
+                continue
+            strat = site.get("strategy", "-")
+            mode = FAILURE_MODE_BY_STRATEGY.get(strat, unknown)
+            counts[mode] += 1
+    return counts
+
+
+def lifetime_sanity_violations(dumps):
+    """Flag picker mis-classifications detectable from the dump alone.
+
+    A site tagged Reap is one whose free/alloc ratio the picker thinks
+    is close to 1. If the dump shows frees ≪ allocs (ratio < 0.1) the
+    classifier was wrong; symmetrically a Hold-tagged site with
+    ratio > 0.5 had unexpectedly high free frequency. Both are
+    research-leverage findings — the *picker* needs the help, not the
+    *workload*, and Phase 5.x asks us to quantify exactly this.
+    """
+    violations = []
+    for workload, d in dumps.items():
+        for site in d.get("sites", []):
+            ev = site.get("events", 0)
+            fr = site.get("frees", 0)
+            if ev <= 0:
+                continue
+            ratio = fr / ev
+            tag = site.get("lifetime", "Unknown")
+            kind = None
+            if tag == "Reap" and ratio < 0.10:
+                kind = "Reap-tagged but observed free/alloc < 0.10"
+            elif tag == "Hold" and ratio > 0.50:
+                kind = "Hold-tagged but observed free/alloc > 0.50"
+            if kind:
+                violations.append({
+                    "workload":     workload,
+                    "site_id":      site.get("id", 0),
+                    "lifetime":     tag,
+                    "events":       ev,
+                    "frees":        fr,
+                    "ratio":        ratio,
+                    "issue":        kind,
+                    "strategy":     site.get("strategy", "-"),
+                    "blacklisted":  site.get("blacklisted", False),
+                })
+    return violations
+
+
 def first_compile_distribution(dumps):
     samples = []
     for d in dumps.values():
@@ -207,7 +299,8 @@ def _fmt_dist_value(stats_key, v):
     return f"{int(v)}"
 
 
-def fmt_text(rows, strategies, lifetimes, blacklists, fce, dists):
+def fmt_text(rows, strategies, lifetimes, blacklists, fce, dists,
+             failure_modes=None, lifetime_violations=None):
     out = []
     out.append("=== Per-workload summary ===")
     out.append(f"{'workload':<22} {'sites':>6} {'cmp':>5} {'bl':>3} "
@@ -245,6 +338,24 @@ def fmt_text(rows, strategies, lifetimes, blacklists, fce, dists):
         out.append(f"  mean={fce_stats['mean']:.0f}  "
                    f"stdev={fce_stats['stdev']:.0f}")
         out.append("")
+    if failure_modes:
+        out.append("=== Failure-mode taxonomy "
+                   "(blacklisted sites, inferred cause) ===")
+        for (label, expl), n in failure_modes.most_common():
+            out.append(f"  {label:<22} {n:>5}   {expl}")
+        out.append("")
+    if lifetime_violations:
+        out.append(f"=== Lifetime mis-classification candidates "
+                   f"(n={len(lifetime_violations)}) ===")
+        for v in lifetime_violations[:25]:
+            out.append(
+                f"  [{v['workload']}] site {v['site_id']:#x} "
+                f"strategy={v['strategy']} ratio={v['ratio']:.3f} "
+                f"— {v['issue']}"
+            )
+        if len(lifetime_violations) > 25:
+            out.append(f"  ... and {len(lifetime_violations) - 25} more")
+        out.append("")
     if dists:
         out.append("=== Cross-workload distributions ===")
         out.append(f"{'metric':<24} {'n':>3} {'min':>8} {'p25':>8} "
@@ -269,7 +380,8 @@ def fmt_text(rows, strategies, lifetimes, blacklists, fce, dists):
     return "\n".join(out)
 
 
-def fmt_md(rows, strategies, lifetimes, blacklists, fce, dists):
+def fmt_md(rows, strategies, lifetimes, blacklists, fce, dists,
+           failure_modes=None, lifetime_violations=None):
     out = []
     out.append("## Per-workload summary")
     out.append("")
@@ -321,6 +433,32 @@ def fmt_md(rows, strategies, lifetimes, blacklists, fce, dists):
         out.append(f"| mean | {fce_stats['mean']:.0f} |")
         out.append(f"| stdev | {fce_stats['stdev']:.0f} |")
         out.append("")
+    if failure_modes:
+        out.append("## Failure-mode taxonomy")
+        out.append("")
+        out.append("| mode | count | likely cause |")
+        out.append("|---|---:|---|")
+        for (label, expl), n in failure_modes.most_common():
+            out.append(f"| {label} | {n} | {expl} |")
+        out.append("")
+    if lifetime_violations:
+        out.append(f"## Lifetime mis-classification candidates "
+                   f"(n={len(lifetime_violations)})")
+        out.append("")
+        out.append("| workload | site | strategy | "
+                   "lifetime | events | frees | ratio | issue |")
+        out.append("|---|---:|---|---|---:|---:|---:|---|")
+        for v in lifetime_violations[:50]:
+            out.append(
+                f"| {v['workload']} | {v['site_id']:#x} | "
+                f"{v['strategy']} | {v['lifetime']} | "
+                f"{v['events']} | {v['frees']} | "
+                f"{v['ratio']:.3f} | {v['issue']} |"
+            )
+        if len(lifetime_violations) > 50:
+            out.append(f"\n_({len(lifetime_violations) - 50} more rows "
+                       f"truncated; see TSV/JSON for the full list)_")
+        out.append("")
     if dists:
         out.append("## Cross-workload distributions")
         out.append("")
@@ -344,7 +482,8 @@ def fmt_md(rows, strategies, lifetimes, blacklists, fce, dists):
     return "\n".join(out)
 
 
-def fmt_tsv(rows, strategies, lifetimes, blacklists, fce, dists):
+def fmt_tsv(rows, strategies, lifetimes, blacklists, fce, dists,
+            failure_modes=None, lifetime_violations=None):
     out = ["section\tkey\tvalue"]
     for r in rows:
         for k, v in r.items():
@@ -362,6 +501,13 @@ def fmt_tsv(rows, strategies, lifetimes, blacklists, fce, dists):
     for metric_key, stats in (dists or {}).items():
         for stat_key, value in stats.items():
             out.append(f"dist:{metric_key}\t{stat_key}\t{value}")
+    for (label, _expl), n in (failure_modes or {}).items():
+        out.append(f"failure_mode\t{label}\t{n}")
+    for v in (lifetime_violations or []):
+        out.append(
+            f"lifetime_violation\t{v['workload']}:{v['site_id']:#x}\t"
+            f"{v['lifetime']}|{v['strategy']}|{v['ratio']:.3f}|{v['issue']}"
+        )
     return "\n".join(out)
 
 
@@ -384,10 +530,14 @@ def main(argv=None):
     blacklists = aggregate_blacklist_reasons(dumps)
     fce = first_compile_distribution(dumps)
     dists = cross_workload_distributions(rows)
+    failure_modes = failure_mode_aggregate(dumps)
+    lifetime_violations = lifetime_sanity_violations(dumps)
 
     formatters = {"text": fmt_text, "md": fmt_md, "tsv": fmt_tsv}
     print(formatters[args.format](
-        rows, strategies, lifetimes, blacklists, fce, dists))
+        rows, strategies, lifetimes, blacklists, fce, dists,
+        failure_modes=failure_modes,
+        lifetime_violations=lifetime_violations))
     return 0
 
 
