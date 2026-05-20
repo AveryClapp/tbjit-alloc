@@ -41,7 +41,14 @@ if [[ ! -d "$SPECS_DIR" ]]; then
 fi
 
 shopt -s nullglob
-SPECS=("$SPECS_DIR"/*.sh)
+# Files starting with _ are shared helpers sourced by specs (e.g.
+# _cxx_fixture.sh) — never treat them as workloads themselves.
+SPECS=()
+for s in "$SPECS_DIR"/*.sh; do
+  base=$(basename "$s")
+  [[ "$base" == _* ]] && continue
+  SPECS+=("$s")
+done
 shopt -u nullglob
 
 if [[ ${#SPECS[@]} -eq 0 ]]; then
