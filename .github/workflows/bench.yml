@@ -44,14 +44,25 @@ jobs:
 
       - name: Capture per-workload TBJIT_DUMP (auto-strategy picker)
         run: |
-          mkdir -p bench-out/dumps
+          mkdir -p bench-out/dumps bench-out/json
           for p in monomorphic arena mixed pulse bimodal lifo producer_consumer hold; do
             bin=build/bench/bench_$p
             [ -x "$bin" ] || { echo "skip $p: missing"; continue; }
-            LD_PRELOAD=$PWD/build/libtbjit.so TBJIT_DUMP=1 "$bin" \
+            LD_PRELOAD=$PWD/build/libtbjit.so TBJIT_DUMP=1 \
+              TBJIT_DUMP_JSON=$PWD/bench-out/json/${p}.json \
+              "$bin" \
               > bench-out/dumps/${p}.stdout \
               2> bench-out/dumps/${p}.dump
           done
+
+      - name: Aggregate picker stats across workloads
+        run: |
+          python3 tools/analyze_dumps.py bench-out/json --format md \
+            > bench-out/aggregate.md
+          python3 tools/analyze_dumps.py bench-out/json --format text \
+            > bench-out/aggregate.txt
+          python3 tools/analyze_dumps.py bench-out/json --format tsv \
+            > bench-out/aggregate.tsv
 
       - name: Render results into job summary
         run: |
@@ -73,6 +84,14 @@ jobs:
             echo '```'
             cat bench-out/micro.txt
             echo '```'
+            echo
+            echo "## Auto-picker aggregate (cross-workload)"
+            echo
+            if [ -s bench-out/aggregate.md ]; then
+              cat bench-out/aggregate.md
+            else
+              echo "_no aggregate produced (no JSON dumps found)_"
+            fi
             echo
             echo "## Auto-picker decisions per workload"
             for f in bench-out/dumps/*.dump; do
