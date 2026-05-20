@@ -117,9 +117,97 @@ def quantile(sorted_samples, q):
     return sorted_samples[idx]
 
 
+# Quantile set used in every "distribution" section. Picked to match the
+# granularity reviewers expect for CDF-style claims in the paper: a few
+# tail points (p90/p95/p99) for "how bad does it get?" and a few middle
+# points (p25/p50/p75) for "what does a typical site look like?".
+DIST_QUANTILES = [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+
+
+def distribution_stats(values):
+    """Return a dict of summary stats over `values` (an iterable of numbers).
+
+    Empty inputs return a dict where everything is 0 — formatters can
+    then render a one-row "n=0" line rather than crashing on an empty
+    workload set. mean/stdev are intentionally float; quantiles match
+    the input type so integer-valued samples stay integer-readable.
+    """
+    s = sorted(values)
+    n = len(s)
+    stats = {"n": n}
+    if n == 0:
+        for q in DIST_QUANTILES:
+            stats[f"p{int(q*100)}"] = 0
+        stats.update(min=0, max=0, mean=0.0, stdev=0.0)
+        return stats
+    stats["min"] = s[0]
+    stats["max"] = s[-1]
+    stats["mean"] = statistics.mean(s)
+    stats["stdev"] = statistics.stdev(s) if n > 1 else 0.0
+    for q in DIST_QUANTILES:
+        stats[f"p{int(q*100)}"] = quantile(s, q)
+    return stats
+
+
+def cross_workload_distributions(rows):
+    """Per-metric distribution stats across workloads.
+
+    Each metric becomes a row in the output table: "compile rate varied
+    from 12% to 91% across N workloads, p50 = 45%." This is the answer
+    to roadmap question 1: "Across N workloads, what fraction of call
+    sites reach Compiled state?" — but as a *distribution*, not a
+    single bucket-mean, because the variance is the paper-interesting
+    signal.
+    """
+    if not rows:
+        return {}
+    sites = [r["sites"] for r in rows]
+    compiled = [r["compiled"] for r in rows]
+    blacklisted = [r["blacklisted"] for r in rows]
+    compile_rate_pct = [
+        100.0 * r["compiled"] / r["sites"] if r["sites"] else 0.0
+        for r in rows
+    ]
+    blacklist_rate_pct = [
+        100.0 * r["blacklisted"] / r["sites"] if r["sites"] else 0.0
+        for r in rows
+    ]
+    jit_pct = [r["jit_pct"] for r in rows]
+    return {
+        "sites_per_workload": distribution_stats(sites),
+        "compiled_per_workload": distribution_stats(compiled),
+        "blacklisted_per_workload": distribution_stats(blacklisted),
+        "compile_rate_pct": distribution_stats(compile_rate_pct),
+        "blacklist_rate_pct": distribution_stats(blacklist_rate_pct),
+        "jit_alloc_pct": distribution_stats(jit_pct),
+    }
+
+
 # --- formatters ------------------------------------------------------------
 
-def fmt_text(rows, strategies, lifetimes, blacklists, fce):
+_DIST_METRIC_LABELS = {
+    "sites_per_workload":      "sites / workload",
+    "compiled_per_workload":   "compiled / workload",
+    "blacklisted_per_workload":"blacklisted / workload",
+    "compile_rate_pct":        "compile rate (%)",
+    "blacklist_rate_pct":      "blacklist rate (%)",
+    "jit_alloc_pct":           "JIT alloc fraction (%)",
+}
+
+
+def _fmt_dist_value(stats_key, v):
+    """Format a stat value for display.
+
+    Percent-valued metrics get one decimal; counts stay integer (cast
+    to int so a numpy/statistics float doesn't slip through with .0).
+    """
+    if isinstance(v, float):
+        # mean/stdev or pct distributions
+        return f"{v:.1f}"
+    return f"{int(v)}"
+
+
+def fmt_text(rows, strategies, lifetimes, blacklists, fce, dists):
     out = []
     out.append("=== Per-workload summary ===")
     out.append(f"{'workload':<22} {'sites':>6} {'cmp':>5} {'bl':>3} "
@@ -148,16 +236,40 @@ def fmt_text(rows, strategies, lifetimes, blacklists, fce):
             out.append(f"  {strat:<22} {n:>5}")
         out.append("")
     if fce:
-        out.append(f"=== Events-to-specialize distribution (n={len(fce)}) ===")
-        out.append(f"  min={fce[0]}  p50={quantile(fce, 0.50)}  "
-                   f"p95={quantile(fce, 0.95)}  max={fce[-1]}")
-        if len(fce) > 1:
-            out.append(f"  mean={statistics.mean(fce):.0f}  "
-                       f"stdev={statistics.stdev(fce):.0f}")
+        fce_stats = distribution_stats(fce)
+        out.append(f"=== Events-to-specialize distribution (n={fce_stats['n']}) ===")
+        out.append(
+            "  min={min}  p10={p10}  p25={p25}  p50={p50}  p75={p75}  "
+            "p90={p90}  p95={p95}  p99={p99}  max={max}".format(**fce_stats)
+        )
+        out.append(f"  mean={fce_stats['mean']:.0f}  "
+                   f"stdev={fce_stats['stdev']:.0f}")
+        out.append("")
+    if dists:
+        out.append("=== Cross-workload distributions ===")
+        out.append(f"{'metric':<24} {'n':>3} {'min':>8} {'p25':>8} "
+                   f"{'p50':>8} {'p75':>8} {'p95':>8} {'max':>8} "
+                   f"{'mean':>8} {'stdev':>8}")
+        out.append("-" * 96)
+        for key, label in _DIST_METRIC_LABELS.items():
+            s = dists.get(key)
+            if not s or s["n"] == 0:
+                continue
+            out.append(
+                f"{label:<24} {s['n']:>3} "
+                f"{_fmt_dist_value(key, s['min']):>8} "
+                f"{_fmt_dist_value(key, s['p25']):>8} "
+                f"{_fmt_dist_value(key, s['p50']):>8} "
+                f"{_fmt_dist_value(key, s['p75']):>8} "
+                f"{_fmt_dist_value(key, s['p95']):>8} "
+                f"{_fmt_dist_value(key, s['max']):>8} "
+                f"{s['mean']:>8.1f} "
+                f"{s['stdev']:>8.1f}"
+            )
     return "\n".join(out)
 
 
-def fmt_md(rows, strategies, lifetimes, blacklists, fce):
+def fmt_md(rows, strategies, lifetimes, blacklists, fce, dists):
     out = []
     out.append("## Per-workload summary")
     out.append("")
@@ -198,21 +310,41 @@ def fmt_md(rows, strategies, lifetimes, blacklists, fce):
             out.append(f"| {strat} | {n} |")
         out.append("")
     if fce:
-        out.append(f"## Events-to-specialize distribution (n={len(fce)})")
+        fce_stats = distribution_stats(fce)
+        out.append(f"## Events-to-specialize distribution (n={fce_stats['n']})")
         out.append("")
         out.append("| stat | value |")
         out.append("|---|---:|")
-        out.append(f"| min | {fce[0]} |")
-        out.append(f"| p50 | {quantile(fce, 0.50)} |")
-        out.append(f"| p95 | {quantile(fce, 0.95)} |")
-        out.append(f"| max | {fce[-1]} |")
-        if len(fce) > 1:
-            out.append(f"| mean | {statistics.mean(fce):.0f} |")
-            out.append(f"| stdev | {statistics.stdev(fce):.0f} |")
+        for stat in ("min", "p10", "p25", "p50", "p75", "p90", "p95", "p99",
+                     "max"):
+            out.append(f"| {stat} | {fce_stats[stat]} |")
+        out.append(f"| mean | {fce_stats['mean']:.0f} |")
+        out.append(f"| stdev | {fce_stats['stdev']:.0f} |")
+        out.append("")
+    if dists:
+        out.append("## Cross-workload distributions")
+        out.append("")
+        out.append("| metric | n | min | p25 | p50 | p75 | p95 | max | "
+                   "mean | stdev |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for key, label in _DIST_METRIC_LABELS.items():
+            s = dists.get(key)
+            if not s or s["n"] == 0:
+                continue
+            out.append(
+                f"| {label} | {s['n']} | "
+                f"{_fmt_dist_value(key, s['min'])} | "
+                f"{_fmt_dist_value(key, s['p25'])} | "
+                f"{_fmt_dist_value(key, s['p50'])} | "
+                f"{_fmt_dist_value(key, s['p75'])} | "
+                f"{_fmt_dist_value(key, s['p95'])} | "
+                f"{_fmt_dist_value(key, s['max'])} | "
+                f"{s['mean']:.1f} | {s['stdev']:.1f} |"
+            )
     return "\n".join(out)
 
 
-def fmt_tsv(rows, strategies, lifetimes, blacklists, fce):
+def fmt_tsv(rows, strategies, lifetimes, blacklists, fce, dists):
     out = ["section\tkey\tvalue"]
     for r in rows:
         for k, v in r.items():
@@ -227,6 +359,9 @@ def fmt_tsv(rows, strategies, lifetimes, blacklists, fce):
         out.append(f"blacklist_strategy\t{strat}\t{n}")
     for v in fce:
         out.append(f"fce\t-\t{v}")
+    for metric_key, stats in (dists or {}).items():
+        for stat_key, value in stats.items():
+            out.append(f"dist:{metric_key}\t{stat_key}\t{value}")
     return "\n".join(out)
 
 
@@ -248,9 +383,11 @@ def main(argv=None):
     lifetimes = aggregate_lifetimes(dumps)
     blacklists = aggregate_blacklist_reasons(dumps)
     fce = first_compile_distribution(dumps)
+    dists = cross_workload_distributions(rows)
 
     formatters = {"text": fmt_text, "md": fmt_md, "tsv": fmt_tsv}
-    print(formatters[args.format](rows, strategies, lifetimes, blacklists, fce))
+    print(formatters[args.format](
+        rows, strategies, lifetimes, blacklists, fce, dists))
     return 0
 
 
