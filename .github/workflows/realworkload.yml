@@ -21,9 +21,15 @@ on:
   push:
     branches: [main]
     paths:
+      # Re-run when the runner or the analyzer changes…
       - 'bench/realworkload/**'
       - 'tools/analyze_dumps.py'
       - '.github/workflows/realworkload.yml'
+      # …and when tbjit itself changes. Phase 1 data is what we use to
+      # judge whether a perf / correctness fix actually helps real
+      # workloads, so a src/ commit should regenerate the manifest.
+      - 'src/**'
+      - 'CMakeLists.txt'
 
 jobs:
   realworkload:
