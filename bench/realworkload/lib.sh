@@ -114,19 +114,32 @@ init_out_dir() {
 # to a wall-time-only measurement using SECONDS. macOS isn't where we
 # expect to run real workloads — CI is Linux — but local development
 # shouldn't crash.
+#
+# WORKLOAD_TIMEOUT_S (env, default 180): hard cap per allocator run. A
+# misbehaving workload (e.g. a deadlocked tbjit interposition) used to
+# eat the entire 30-min CI budget; the timeout means it costs <= 3 min
+# instead and we still see the other allocators' numbers.
 time_cmd() {
   local stdout_path="$1" stderr_path="$2" time_path="$3"
   shift 3
   [[ "$1" == "--" ]] && shift
+
+  local timeout_s="${WORKLOAD_TIMEOUT_S:-180}"
 
   local exit_status=0
   if [[ "$(uname)" == "Linux" ]] && command -v /usr/bin/time >/dev/null 2>&1; then
     # /usr/bin/time -v writes its report to stderr, and we want it to
     # land in stderr_path AFTER the command's own stderr. Easiest: tee
     # cmd's stderr to a temp, then append time's report.
+    #
+    # `timeout --foreground` keeps Ctrl-C interactive; --kill-after=5s
+    # escalates to SIGKILL if the workload ignores SIGTERM. Exit 124
+    # from timeout(1) surfaces as the run's exit status so the manifest
+    # records the timeout instead of looking like a clean failure.
     local time_report
     time_report=$(mktemp)
     if /usr/bin/time -v -o "$time_report" \
+        timeout --foreground --kill-after=5s "${timeout_s}s" \
         bash -c "\"\$@\" >\"$stdout_path\" 2>\"$stderr_path\"" \
         _ "$@"; then
       exit_status=0
