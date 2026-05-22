@@ -112,12 +112,16 @@ for kind in "${ALLOCATORS[@]}"; do
              "TBJIT_DUMP_JSON=$W_DIR/json/$WORKLOAD_NAME.json")
   fi
 
-  # env "$@" path keeps LD_PRELOAD limited to the cmd, not bash itself
-  # (preloading tbjit into the bash wrapper would interpose its own
-  # mallocs and inflate the trace).
+  # env "$@" path keeps LD_PRELOAD limited to the cmd, not bash itself.
+  # `exec $CMD_STR` inside the bash -c is critical: without it, bash
+  # interprets the command string but stays around until the child
+  # exits, so its own tbjit_fini fires *after* the workload's and
+  # overwrites TBJIT_DUMP_JSON with bash's much smaller dump. With
+  # `exec`, bash replaces itself with the workload — only one process
+  # owns the dump path and the JSON reflects the real workload.
   rc=0
   time_cmd "$stdout_path" "$stderr_path" "$time_path" -- \
-    env "${env_kv[@]}" bash -c "$CMD_STR" || rc=$?
+    env "${env_kv[@]}" bash -c "exec $CMD_STR" || rc=$?
   append_manifest "$OUT_DIR" "$WORKLOAD_NAME" "$kind" "$time_path"
 
   if [[ $rc -eq 0 ]]; then
