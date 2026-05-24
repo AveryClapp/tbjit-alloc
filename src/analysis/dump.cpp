@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 // Counters defined at global scope in trampoline.cpp.
 extern std::atomic<uint64_t> g_jit_allocs;
@@ -194,7 +195,31 @@ void print_summary(FILE* out, const Summary& sum) {
 // Optional structured-output sink for downstream paper-analysis scripts.
 // Activated via env TBJIT_DUMP_JSON=/path/to/file.json. Emits a single
 // JSON object: { meta:{...}, summary:{...}, sites:[...] }.
+//
+// `%p` in the path is replaced with the current PID — necessary when
+// the workload forks subprocesses that inherit LD_PRELOAD (e.g. gcc
+// driver → cc1plus → as). Without it, the last process to exit
+// overwrites everyone else's dump and the JSON reflects whichever
+// child happens to finish last — usually the smallest, since the
+// driver typically does the least allocation. With `%p`, each
+// process writes its own file and the runner can pick the dominant
+// one post-hoc.
 void write_json_dump(const char* path, const Summary& sum) {
+    char resolved[1024];
+    const char* pct = std::strstr(path, "%p");
+    if (pct) {
+        size_t prefix_len = static_cast<size_t>(pct - path);
+        if (prefix_len >= sizeof(resolved)) return;
+        std::memcpy(resolved, path, prefix_len);
+        int n = std::snprintf(resolved + prefix_len,
+                              sizeof(resolved) - prefix_len,
+                              "%d%s",
+                              static_cast<int>(getpid()),
+                              pct + 2);
+        if (n < 0 || prefix_len + static_cast<size_t>(n) >= sizeof(resolved))
+            return;
+        path = resolved;
+    }
     FILE* j = std::fopen(path, "w");
     if (!j) return;
     uint64_t jit_n = g_jit_allocs.load(std::memory_order_relaxed);

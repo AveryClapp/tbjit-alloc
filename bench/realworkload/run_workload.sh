@@ -108,8 +108,12 @@ for kind in "${ALLOCATORS[@]}"; do
     env_kv+=("LD_PRELOAD=$lib")
   fi
   if [[ "$kind" == "tbjit" ]]; then
+    # %p is substituted by tbjit with the writer's PID — workloads that
+    # fork children (gcc driver → cc1plus → as) need this or the last
+    # process to exit (usually the smallest) overwrites the others'
+    # dumps. analyze_dumps.py picks the dominant PID per workload.
     env_kv+=("TBJIT_DUMP=1"
-             "TBJIT_DUMP_JSON=$W_DIR/json/$WORKLOAD_NAME.json")
+             "TBJIT_DUMP_JSON=$W_DIR/json/$WORKLOAD_NAME.%p.json")
   fi
 
   # Inline the env assignments as a shell prefix inside the bash -c so

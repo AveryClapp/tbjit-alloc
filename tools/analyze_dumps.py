@@ -27,20 +27,53 @@ import sys
 from collections import Counter
 
 
+def _workload_key(fname):
+    """Strip optional `.<pid>` PID suffix used by TBJIT_DUMP_JSON's %p
+    substitution. `gcc_compile.3856.json` -> `gcc_compile`. Plain
+    `gcc_compile.json` -> `gcc_compile`."""
+    stem = fname[:-5]  # drop .json
+    if "." in stem:
+        head, tail = stem.rsplit(".", 1)
+        if tail.isdigit():
+            return head
+    return stem
+
+
 def load_dumps(dir_path):
-    """Return {workload_name: parsed_json_dict} for every *.json in dir."""
+    """Return {workload_name: parsed_json_dict}.
+
+    Each workload may have produced multiple JSON files (one per
+    process when the workload forks under LD_PRELOAD — e.g. gcc
+    driver + cc1plus + as). The runner writes them with %p PID
+    substitution so they don't clobber each other; we group by
+    workload here and keep the **dump with the most total events**
+    as representative. That's the "dominant" process — for gcc that's
+    cc1plus, for clang that's the driver, etc. The smaller dumps
+    are still on disk if a deeper per-process analysis is needed
+    later, but the cross-workload aggregate only sees one dump per
+    workload, which matches the analyzer's mental model.
+    """
     dumps = {}
     if not os.path.isdir(dir_path):
         return dumps
+    grouped = {}
     for fname in sorted(os.listdir(dir_path)):
         if not fname.endswith(".json"):
             continue
         path = os.path.join(dir_path, fname)
         try:
             with open(path) as f:
-                dumps[fname[:-5]] = json.load(f)
+                d = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             print(f"# skipping {fname}: {e}", file=sys.stderr)
+            continue
+        key = _workload_key(fname)
+        s = d.get("summary", {})
+        total = s.get("jit_allocs", 0) + s.get("generic_allocs", 0)
+        grouped.setdefault(key, []).append((total, d))
+    for key, candidates in grouped.items():
+        candidates.sort(key=lambda x: -x[0])
+        dumps[key] = candidates[0][1]
     return dumps
 
 
