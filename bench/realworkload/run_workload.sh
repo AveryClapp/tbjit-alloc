@@ -112,16 +112,26 @@ for kind in "${ALLOCATORS[@]}"; do
              "TBJIT_DUMP_JSON=$W_DIR/json/$WORKLOAD_NAME.json")
   fi
 
-  # env "$@" path keeps LD_PRELOAD limited to the cmd, not bash itself.
-  # `exec $CMD_STR` inside the bash -c is critical: without it, bash
-  # interprets the command string but stays around until the child
-  # exits, so its own tbjit_fini fires *after* the workload's and
-  # overwrites TBJIT_DUMP_JSON with bash's much smaller dump. With
-  # `exec`, bash replaces itself with the workload — only one process
-  # owns the dump path and the JSON reflects the real workload.
+  # Inline the env assignments as a shell prefix inside the bash -c so
+  # they apply *only* to the workload command, not to bash itself.
+  #
+  # The earlier `env LD_PRELOAD=… bash -c "exec $CMD_STR"` approach set
+  # LD_PRELOAD on bash too: bash's tbjit_init ran, recorded ~256 startup
+  # allocations on ~18 sites, and bash's destructor fired *after* the
+  # workload's (the b5460dd `exec` was bypassed, possibly because GNU
+  # /usr/bin/time intercepts wait via a forked monitor). Net effect: the
+  # workload wrote a 273-site / 50k-JIT-alloc dump, then bash overwrote
+  # the JSON with its 18-site / 256-alloc startup pattern. By prefixing
+  # the env assignments to the command inside bash, bash itself never
+  # has LD_PRELOAD; tbjit only interposes inside the workload's process.
+  local env_prefix=""
+  local kv
+  for kv in "${env_kv[@]}"; do
+    env_prefix+="$kv "
+  done
   rc=0
   time_cmd "$stdout_path" "$stderr_path" "$time_path" -- \
-    env "${env_kv[@]}" bash -c "exec $CMD_STR" || rc=$?
+    bash -c "${env_prefix}${CMD_STR}" || rc=$?
   append_manifest "$OUT_DIR" "$WORKLOAD_NAME" "$kind" "$time_path"
 
   if [[ $rc -eq 0 ]]; then
