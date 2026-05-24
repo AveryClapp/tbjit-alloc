@@ -124,8 +124,7 @@ for kind in "${ALLOCATORS[@]}"; do
   # the JSON with its 18-site / 256-alloc startup pattern. By prefixing
   # the env assignments to the command inside bash, bash itself never
   # has LD_PRELOAD; tbjit only interposes inside the workload's process.
-  local env_prefix=""
-  local kv
+  env_prefix=""
   for kv in "${env_kv[@]}"; do
     env_prefix+="$kv "
   done
