@@ -4,7 +4,6 @@
 #include "deopt/deopt.h"
 #include "shadow/shadow.h"
 #include "analysis/analysis.h"
-#include "codegen/tls.h"
 #include "codegen/slow_init.h"
 #include "seg/segment.h"
 #include "common.h"
@@ -220,67 +219,7 @@ void free(void* ptr) {
     if (ptr) {
         tbjit::seg::SegmentHeader* s = tbjit::seg::of(ptr);
         if (tbjit::seg::is_managed(s)) {
-            switch (s->strategy) {
-                case tbjit::Strategy::BumpAlloc:
-                case tbjit::Strategy::EpochArena:
-                    break;  // chunks live until segment reclaim
-                case tbjit::Strategy::ProducerConsumer:
-                    // Active segment: foreign frees push to MPSC for the
-                    // refill path to drain on retire. Retired segment:
-                    // decrement live_chunks; reaper reclaims at zero.
-                    if (s->retired) {
-                        s->live_chunks.fetch_sub(
-                            1, std::memory_order_release);
-                    } else {
-                        tbjit::seg::mpsc_push(s, ptr);
-                    }
-                    break;
-                case tbjit::Strategy::PairedStack: {
-                    // LIFO rewind via the TLS slot the JIT fast path
-                    // actually reads — seg->bump_ptr alone is a stale
-                    // mirror and rewinding it wouldn't recycle the chunk.
-                    // Same-thread only: cross-thread frees can't touch
-                    // the owner's TLS. PairedStack's detection rule
-                    // requires concentrated alloc/free on one site pair,
-                    // so cross-thread frees are rare; drop those chunks.
-                    if (s->owner_tid == tbjit::seg::current_tid())
-                        tbjit::codegen::paired_lifo_rewind(s, ptr);
-                    break;
-                }
-                case tbjit::Strategy::ThreadLocalFreeList: {
-                    if (s->retired) {
-                        s->live_chunks.fetch_sub(
-                            1, std::memory_order_release);
-                        break;
-                    }
-                    uint32_t my_tid = tbjit::seg::current_tid();
-                    if (s->owner_tid == my_tid) {
-                        *static_cast<void**>(ptr) =
-                            tbjit::codegen::tl_freelists[s->slot_index].head;
-                        tbjit::codegen::tl_freelists[s->slot_index].head = ptr;
-                    } else {
-                        tbjit::seg::mpsc_push(s, ptr);
-                    }
-                    break;
-                }
-                case tbjit::Strategy::MultiSizeFreeList: {
-                    if (s->retired) {
-                        s->live_chunks.fetch_sub(
-                            1, std::memory_order_release);
-                        break;
-                    }
-                    uint32_t my_tid = tbjit::seg::current_tid();
-                    if (s->owner_tid == my_tid) {
-                        auto& m = tbjit::codegen::tl_multi_freelists[s->slot_index];
-                        *static_cast<void**>(ptr) = m.heads[s->class_idx];
-                        m.heads[s->class_idx] = ptr;
-                    } else {
-                        tbjit::seg::mpsc_push(s, ptr);
-                    }
-                    break;
-                }
-                default: break;
-            }
+            tbjit::codegen::free_managed(s, ptr);
         } else {
             real_free(ptr);
         }

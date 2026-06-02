@@ -57,6 +57,14 @@ void* multi_refill(uint32_t slot, uint32_t obj_size, uint32_t class_idx);
 // and returns the first allocation pointer.
 uint8_t* arena_slow_init(uint32_t index, uint32_t size);
 
+// Return a tbjit-managed chunk to its strategy's free structures. `s` must be
+// the (managed) segment header of `ptr` — the caller is responsible for the
+// seg::is_managed(s) check. This is the strategy-switch body shared by the
+// LD_PRELOAD free() trampoline and the offline bound-replay harness, both of
+// which reclaim managed chunks identically but the harness runs without the
+// trampoline preamble (reentrancy guard, safe-point, dispatch).
+void free_managed(seg::SegmentHeader* s, void* ptr);
+
 // Called from the EpochArena slow path when the bump pointer reaches end.
 // Resets tl_arenas[index].ptr to base, then bumps it by size and returns
 // the original base — i.e. recycles the existing region without unmapping.

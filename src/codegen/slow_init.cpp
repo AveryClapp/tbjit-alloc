@@ -72,6 +72,65 @@ bool paired_lifo_rewind(seg::SegmentHeader* s, void* ptr) {
     return true;
 }
 
+void free_managed(seg::SegmentHeader* s, void* ptr) {
+    switch (s->strategy) {
+        case Strategy::BumpAlloc:
+        case Strategy::EpochArena:
+            break;  // chunks live until segment reclaim
+        case Strategy::ProducerConsumer:
+            // Active segment: foreign frees push to MPSC for the refill path
+            // to drain on retire. Retired segment: decrement live_chunks;
+            // reaper reclaims at zero.
+            if (s->retired) {
+                s->live_chunks.fetch_sub(1, std::memory_order_release);
+            } else {
+                seg::mpsc_push(s, ptr);
+            }
+            break;
+        case Strategy::PairedStack: {
+            // LIFO rewind via the TLS slot the JIT fast path actually reads —
+            // seg->bump_ptr alone is a stale mirror and rewinding it wouldn't
+            // recycle the chunk. Same-thread only: cross-thread frees can't
+            // touch the owner's TLS. PairedStack's detection rule requires
+            // concentrated alloc/free on one site pair, so cross-thread frees
+            // are rare; drop those chunks.
+            if (s->owner_tid == seg::current_tid())
+                paired_lifo_rewind(s, ptr);
+            break;
+        }
+        case Strategy::ThreadLocalFreeList: {
+            if (s->retired) {
+                s->live_chunks.fetch_sub(1, std::memory_order_release);
+                break;
+            }
+            uint32_t my_tid = seg::current_tid();
+            if (s->owner_tid == my_tid) {
+                *static_cast<void**>(ptr) = tl_freelists[s->slot_index].head;
+                tl_freelists[s->slot_index].head = ptr;
+            } else {
+                seg::mpsc_push(s, ptr);
+            }
+            break;
+        }
+        case Strategy::MultiSizeFreeList: {
+            if (s->retired) {
+                s->live_chunks.fetch_sub(1, std::memory_order_release);
+                break;
+            }
+            uint32_t my_tid = seg::current_tid();
+            if (s->owner_tid == my_tid) {
+                auto& m = tl_multi_freelists[s->slot_index];
+                *static_cast<void**>(ptr) = m.heads[s->class_idx];
+                m.heads[s->class_idx] = ptr;
+            } else {
+                seg::mpsc_push(s, ptr);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
 void* freelist_refill(uint32_t index, uint32_t obj_size) {
     assert(obj_size >= sizeof(void*) && "free-list chunk must hold a pointer");
 
