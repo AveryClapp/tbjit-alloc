@@ -14,13 +14,18 @@ enum class Phase : uint8_t { PreSpec, Compiled, Deopt };
 //   Unknown — too few events; default to Hold (conservative).
 enum class LifetimeTag : uint8_t { Unknown, Reap, Hold };
 
+// Runtime-configurable picker knobs (env-overridable; see analysis.cpp). Declared
+// here so SizeWindow::full() can read window_size() from its inline body.
+uint32_t window_size();            // TBJIT_WINDOW_SIZE, default 1000
+double   ks_alpha();               // TBJIT_KS_ALPHA, default 0.05
+uint32_t deopt_blacklist_limit();  // TBJIT_DEOPT_LIMIT, default 3
+
 struct SizeWindow {
     ExactHistogram hist;
     uint32_t       count{0};
 
-    static constexpr uint32_t WINDOW_SIZE = 1000;
-
-    bool full() const { return count >= WINDOW_SIZE; }
+    // WINDOW_SIZE is runtime-configurable (TBJIT_WINDOW_SIZE); see analysis.cpp.
+    bool full() const { return count >= window_size(); }
     void record(uint32_t size) { hist.record(size); ++count; }
     void reset() { hist.reset(); count = 0; }
 };

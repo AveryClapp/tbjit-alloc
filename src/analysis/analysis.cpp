@@ -26,8 +26,12 @@ namespace {
 constexpr size_t   MAX_CALL_SITES        = 4096;
 constexpr uint32_t STABLE_WINDOWS_DEFAULT = 10;
 uint32_t           g_stable_windows       = STABLE_WINDOWS_DEFAULT;
-constexpr double   KS_ALPHA              = 0.05;
-constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, stop recompiling
+constexpr uint32_t WINDOW_SIZE_DEFAULT    = 1000;
+uint32_t           g_window_size          = WINDOW_SIZE_DEFAULT;
+constexpr double   KS_ALPHA_DEFAULT       = 0.05;
+double             g_ks_alpha             = KS_ALPHA_DEFAULT;
+constexpr uint32_t DEOPT_BLACKLIST_LIMIT_DEFAULT = 3;  // after this many deopts, stop recompiling
+uint32_t           g_deopt_blacklist_limit = DEOPT_BLACKLIST_LIMIT_DEFAULT;
 constexpr double   LIFETIME_REAP_RATIO   = 0.50;  // free_count/event_count >= → Reap
 constexpr double   LIFETIME_HOLD_RATIO   = 0.10;  // free_count/event_count <  → Hold
 constexpr double   PC_TID_CONCENTRATION  = 0.95;  // top_count/total >= → concentrated
@@ -69,7 +73,7 @@ void advance_prespec(CallSiteSummary* s) {
     uint8_t prev = 1 - s->active;
     bool stable = s->windows[prev].count > 0 &&
                   ks_stable(s->windows[s->active].hist,
-                             s->windows[prev].hist, KS_ALPHA);
+                             s->windows[prev].hist, g_ks_alpha);
     if (stable) {
         ++s->stable_windows;
         if (s->stable_windows >= g_stable_windows) {
@@ -185,7 +189,7 @@ void advance_prespec(CallSiteSummary* s) {
 }
 
 void check_postspec(CallSiteSummary* s) {
-    if (!ks_stable(s->post_window.hist, s->baseline, KS_ALPHA)) {
+    if (!ks_stable(s->post_window.hist, s->baseline, g_ks_alpha)) {
         s->phase = Phase::Deopt;
         s->stable_windows = 0;
         s->windows[0].reset();
@@ -250,15 +254,33 @@ void* background_loop(void*) {
 } // namespace
 
 uint32_t stable_windows_threshold() { return g_stable_windows; }
+uint32_t window_size()              { return g_window_size; }
+double   ks_alpha()                 { return g_ks_alpha; }
+uint32_t deopt_blacklist_limit()    { return g_deopt_blacklist_limit; }
 
 void init() {
     alloc::init();
-    // Convergence bar is env-overridable for the sensitivity sweep; reset to
-    // the default each init() so the override does not persist across re-inits.
+    // Picker knobs are env-overridable for the sensitivity sweep; reset each to
+    // its default first so an override does not persist across re-inits.
     g_stable_windows = STABLE_WINDOWS_DEFAULT;
     if (const char* v = std::getenv("TBJIT_STABLE_WINDOWS")) {
         uint32_t n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         if (n > 0) g_stable_windows = n;
+    }
+    g_window_size = WINDOW_SIZE_DEFAULT;
+    if (const char* v = std::getenv("TBJIT_WINDOW_SIZE")) {
+        uint32_t n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+        if (n > 0) g_window_size = n;
+    }
+    g_ks_alpha = KS_ALPHA_DEFAULT;
+    if (const char* v = std::getenv("TBJIT_KS_ALPHA")) {
+        double a = std::strtod(v, nullptr);
+        if (a > 0.0 && a < 1.0) g_ks_alpha = a;
+    }
+    g_deopt_blacklist_limit = DEOPT_BLACKLIST_LIMIT_DEFAULT;
+    if (const char* v = std::getenv("TBJIT_DEOPT_LIMIT")) {
+        uint32_t n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+        if (n > 0) g_deopt_blacklist_limit = n;
     }
     init_state();
 }
@@ -396,7 +418,7 @@ void reset_call_site(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i) {
         if (g_summaries[i].id == id) {
             ++g_summaries[i].deopt_count;
-            if (g_summaries[i].deopt_count >= DEOPT_BLACKLIST_LIMIT)
+            if (g_summaries[i].deopt_count >= g_deopt_blacklist_limit)
                 g_summaries[i].blacklisted = true;
             g_summaries[i].phase = Phase::Deopt;
             g_summaries[i].code_page = nullptr;

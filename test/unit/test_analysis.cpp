@@ -73,6 +73,33 @@ static void test_stable_windows_threshold_default() {
     assert(tbjit::analysis::stable_windows_threshold() == 10u);
 }
 
+static void test_window_size_reads_env() {
+    setenv("TBJIT_WINDOW_SIZE", "500", 1);
+    tbjit::analysis::init();
+    assert(tbjit::analysis::window_size() == 500u);
+    unsetenv("TBJIT_WINDOW_SIZE");
+    tbjit::analysis::init();
+    assert(tbjit::analysis::window_size() == 1000u);
+}
+
+static void test_ks_alpha_reads_env() {
+    setenv("TBJIT_KS_ALPHA", "0.10", 1);
+    tbjit::analysis::init();
+    assert(tbjit::analysis::ks_alpha() > 0.099 && tbjit::analysis::ks_alpha() < 0.101);
+    unsetenv("TBJIT_KS_ALPHA");
+    tbjit::analysis::init();
+    assert(tbjit::analysis::ks_alpha() > 0.049 && tbjit::analysis::ks_alpha() < 0.051);
+}
+
+static void test_deopt_blacklist_limit_reads_env() {
+    setenv("TBJIT_DEOPT_LIMIT", "5", 1);
+    tbjit::analysis::init();
+    assert(tbjit::analysis::deopt_blacklist_limit() == 5u);
+    unsetenv("TBJIT_DEOPT_LIMIT");
+    tbjit::analysis::init();
+    assert(tbjit::analysis::deopt_blacklist_limit() == 3u);
+}
+
 int main() {
     test_prespec_triggers_compiled();
     test_prespec_unstable_stays_prespec();
@@ -80,5 +107,8 @@ int main() {
     test_candidate_strategy_monomorphic();
     test_stable_windows_threshold_reads_env();
     test_stable_windows_threshold_default();
+    test_window_size_reads_env();
+    test_ks_alpha_reads_env();
+    test_deopt_blacklist_limit_reads_env();
     return 0;
 }
