@@ -1,0 +1,357 @@
+// Trace-driven bound-replay benchmark (Comparison A of the 2026-06-02
+// bound-replay plan). Replays a recorded allocation op stream against ONE
+// backend with zero LD_PRELOAD interposition, isolating the specialized-
+// allocator benefit from the trampoline dispatch tax.
+//
+//   glibc  — alloc -> malloc(size); free -> free(live).  Pure libc baseline.
+//   bound  — offline learning pass populates dispatch via process_event, then
+//            timing pass: alloc -> dispatch::lookup(id); fn(size) if compiled
+//            else g_real_malloc; free -> codegen::free_managed if seg-managed
+//            else free. No trampoline preamble. This is the headline.
+//   sim    — bound + the trampoline malloc preamble (reentrancy guard, sampled
+//            safe-point, dispatch generation + single-entry inline cache). It
+//            cannot replay __builtin_return_address + hash_return_addr (the
+//            harness already holds the site id), so it is a LOWER BOUND on the
+//            real per-call tax and is labeled as such.
+//
+// trampoline.cpp is intentionally NOT linked into this tool: we need pure libc
+// malloc/free for the glibc baseline and zero self-interception during timing.
+// We supply the few globals the rest of tbjit expects the trampoline to define.
+//
+// Usage:
+//   tbjit_bound_bench <trace> [--backend glibc|bound|sim] [--passes N]
+//                     [--label NAME] [--tsv-header]
+//
+// Emits one TSV row to stdout:
+//   backend  workload  p50_ns  ci95_ns  peak_rss_kb  matched_free_frac
+// where p50_ns / ci95_ns are per-ALLOCATION wall-clock latency. Diagnostics go
+// to stderr. RSS is the getrusage(ru_maxrss) high-watermark delta around the
+// run; run one backend per process so the watermark is not contaminated by a
+// prior backend.
+
+#include "analysis/analysis.h"
+#include "dispatch/dispatch.h"
+#include "deopt/deopt.h"
+#include "codegen/slow_init.h"
+#include "seg/segment.h"
+#include "alloc/alloc.h"
+#include "trace/writer.h"  // TraceHeader, TRACE_MAGIC, TRACE_VERSION
+#include "common.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <sys/resource.h>
+
+// --- trampoline-shim globals (trampoline.cpp excluded from this tool) -------
+// codegen embeds g_real_malloc as the JIT routines' fallback; dump references
+// the alloc counters. Set g_real_malloc to libc malloc in main().
+void* (*g_real_malloc)(size_t) = nullptr;
+std::atomic<uint64_t> g_jit_allocs{0};
+std::atomic<uint64_t> g_generic_allocs{0};
+
+using namespace tbjit;
+
+namespace {
+
+enum class Backend { Glibc, Bound, Sim };
+
+enum class OpKind { Alloc, Free };
+struct Op {
+    OpKind     kind;
+    CallSiteID id;    // alloc only
+    uint32_t   size;  // alloc only
+    uint32_t   slot;  // live[] index: alloc fills it, free reads it
+};
+
+bool read_trace(const char* path, std::vector<AllocEvent>& out) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "bound_bench: open %s failed\n", path); return false; }
+    trace::TraceHeader hdr{};
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+        fprintf(stderr, "bound_bench: short read on header\n"); fclose(f); return false;
+    }
+    if (hdr.magic != trace::TRACE_MAGIC) {
+        fprintf(stderr, "bound_bench: bad magic 0x%08x\n", hdr.magic); fclose(f); return false;
+    }
+    if (hdr.version != trace::TRACE_VERSION) {
+        fprintf(stderr, "bound_bench: version mismatch (file=%u tool=%u)\n",
+                hdr.version, trace::TRACE_VERSION);
+        fclose(f); return false;
+    }
+    AllocEvent ev{};
+    while (fread(&ev, sizeof(ev), 1, f) == 1) out.push_back(ev);
+    fclose(f);
+    return true;
+}
+
+// Resolve the recorded op stream into index-addressed ops (alloc -> live slot,
+// free -> the slot of its matching alloc). Pointer remapping happens here, once,
+// outside the timed loop, so the timing pass is pure array indexing. The
+// orig->slot map mirrors process_event's convention: size==0 is a free (so are
+// malloc(0) records, which the analyzer also treats as frees).
+struct Resolved {
+    std::vector<Op> ops;
+    uint32_t        n_allocs       = 0;
+    uint64_t        total_frees    = 0;
+    uint64_t        matched_frees  = 0;
+};
+
+Resolved resolve(const std::vector<AllocEvent>& events) {
+    Resolved r;
+    std::unordered_map<const void*, uint32_t> live_index;
+    live_index.reserve(events.size());
+    for (const AllocEvent& ev : events) {
+        if (ev.size != 0) {  // alloc
+            uint32_t slot = r.n_allocs++;
+            r.ops.push_back({OpKind::Alloc, ev.call_site, ev.size, slot});
+            if (ev.ptr) live_index[ev.ptr] = slot;  // overwrite stale (reuse)
+        } else {             // free
+            ++r.total_frees;
+            auto it = live_index.find(ev.ptr);
+            if (it != live_index.end()) {
+                r.ops.push_back({OpKind::Free, 0, 0, it->second});
+                live_index.erase(it);
+                ++r.matched_frees;
+            }
+            // unmatched free (pre-capture alloc, or dropped on ring overflow):
+            // skip — never fabricate. Counted via total_frees - matched_frees.
+        }
+    }
+    return r;
+}
+
+// --- backend alloc/free -----------------------------------------------------
+
+inline void* glibc_alloc(CallSiteID, size_t size) { return malloc(size); }
+
+inline void* bound_alloc(CallSiteID id, size_t size) {
+    dispatch::RoutineFn fn = dispatch::lookup(id);
+    return fn ? fn(size) : g_real_malloc(size);
+}
+
+// Trampoline malloc preamble, minus the return-address hash (the harness holds
+// the id). Lower-bound per-call tax. Mirrors trampoline.cpp's malloc body.
+thread_local bool                sim_guard    = false;
+thread_local CallSiteID          sim_ic_id    = 0;
+thread_local dispatch::RoutineFn sim_ic_fn    = nullptr;
+thread_local uint64_t            sim_ic_gen   = 0;
+thread_local uint32_t            sim_safe_ctr = 0;
+
+inline void* sim_alloc(CallSiteID id, size_t size) {
+    if (sim_guard) return g_real_malloc(size);
+    sim_guard = true;
+    if ((++sim_safe_ctr & 31) == 0) deopt::mark_safe_point();
+    uint64_t cur_gen = dispatch::generation();
+    dispatch::RoutineFn fn;
+    if (id == sim_ic_id && cur_gen == sim_ic_gen) {
+        fn = sim_ic_fn;
+    } else {
+        fn = dispatch::lookup(id);
+        sim_ic_id = id; sim_ic_fn = fn; sim_ic_gen = cur_gen;
+    }
+    void* ptr = fn ? fn(size) : g_real_malloc(size);
+    sim_guard = false;
+    return ptr;
+}
+
+// Free a live pointer: seg-managed chunks go back through the shared managed-
+// free helper (same path the trampoline uses); libc pointers go to libc.
+inline void managed_aware_free(void* p) {
+    if (!p) return;
+    seg::SegmentHeader* s = seg::of(p);
+    if (seg::is_managed(s)) codegen::free_managed(s, p);
+    else                    free(p);
+}
+
+inline void run_pass(Backend backend, const std::vector<Op>& ops,
+                     std::vector<void*>& live) {
+    switch (backend) {
+        case Backend::Glibc:
+            for (const Op& op : ops) {
+                if (op.kind == OpKind::Alloc) live[op.slot] = glibc_alloc(op.id, op.size);
+                else                          free(live[op.slot]);
+            }
+            break;
+        case Backend::Bound:
+            for (const Op& op : ops) {
+                if (op.kind == OpKind::Alloc) live[op.slot] = bound_alloc(op.id, op.size);
+                else                          managed_aware_free(live[op.slot]);
+            }
+            break;
+        case Backend::Sim:
+            for (const Op& op : ops) {
+                if (op.kind == OpKind::Alloc) live[op.slot] = sim_alloc(op.id, op.size);
+                else                          managed_aware_free(live[op.slot]);
+            }
+            break;
+    }
+}
+
+long peak_rss_kb() {
+    struct rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+#if defined(__APPLE__)
+    return ru.ru_maxrss / 1024;  // Darwin reports bytes
+#else
+    return ru.ru_maxrss;         // Linux reports kilobytes
+#endif
+}
+
+double now_ns() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<double>(ts.tv_sec) * 1e9 + static_cast<double>(ts.tv_nsec);
+}
+
+int usage(const char* a0) {
+    fprintf(stderr,
+        "usage: %s <trace> [--backend glibc|bound|sim] [--passes N] "
+        "[--label NAME] [--tsv-header]\n", a0);
+    return 1;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const char* trace_path = nullptr;
+    Backend backend = Backend::Bound;
+    const char* backend_name = "bound";
+    int passes = 12;
+    std::string label;
+    bool tsv_header = false;
+
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--backend") && i + 1 < argc) {
+            backend_name = argv[++i];
+            if      (!strcmp(backend_name, "glibc")) backend = Backend::Glibc;
+            else if (!strcmp(backend_name, "bound")) backend = Backend::Bound;
+            else if (!strcmp(backend_name, "sim"))   backend = Backend::Sim;
+            else { fprintf(stderr, "bad backend: %s\n", backend_name); return usage(argv[0]); }
+        } else if (!strcmp(argv[i], "--passes") && i + 1 < argc) {
+            passes = atoi(argv[++i]);
+            if (passes < 1) passes = 1;
+        } else if (!strcmp(argv[i], "--label") && i + 1 < argc) {
+            label = argv[++i];
+        } else if (!strcmp(argv[i], "--tsv-header")) {
+            tsv_header = true;
+        } else if (!trace_path) {
+            trace_path = argv[i];
+        } else {
+            return usage(argv[0]);
+        }
+    }
+    if (!trace_path) return usage(argv[0]);
+    if (label.empty()) {
+        const char* slash = strrchr(trace_path, '/');
+        label = slash ? slash + 1 : trace_path;
+        size_t dot = label.rfind('.');
+        if (dot != std::string::npos) label.resize(dot);
+    }
+
+    std::vector<AllocEvent> events;
+    if (!read_trace(trace_path, events)) return 1;
+
+    Resolved r = resolve(events);
+    double matched_frac = r.total_frees
+        ? static_cast<double>(r.matched_frees) / static_cast<double>(r.total_frees)
+        : 1.0;
+
+    fprintf(stderr,
+        "bound_bench: %zu events, %u allocs, %llu frees (%.4f matched), "
+        "backend=%s label=%s\n",
+        events.size(), r.n_allocs,
+        static_cast<unsigned long long>(r.total_frees), matched_frac,
+        backend_name, label.c_str());
+
+    if (tsv_header)
+        printf("backend\tworkload\tp50_ns\tci95_ns\tpeak_rss_kb\tmatched_free_frac\n");
+
+    if (r.n_allocs == 0) {
+        fprintf(stderr, "bound_bench: no alloc ops; nothing to time\n");
+        printf("%s\t%s\t0\t0\t0\t%.4f\n", backend_name, label.c_str(), matched_frac);
+        return 0;
+    }
+
+    tbjit::alloc::init();
+    tbjit::analysis::init_state();   // NOT init(): keep TBJIT_TRACE_ONLY out of
+                                     // the picture and leave compilation enabled
+    tbjit::deopt::init();
+
+    // Learning pass: drive every event through the offline analyzer so the
+    // picker compiles + installs routines exactly as it would online. glibc
+    // needs no learning. Done on this (the timing) thread so the JIT routines'
+    // fs-relative TLS offsets are valid at call time.
+    if (backend != Backend::Glibc) {
+        for (const AllocEvent& ev : events) tbjit::analysis::process_event(ev);
+    }
+
+    std::vector<void*> live(r.n_allocs, nullptr);
+
+#if defined(__linux__) && defined(__x86_64__)
+    const bool can_time = true;
+#else
+    // The JIT routines are emitted x86-64 machine code; calling them on any
+    // other host faults. The glibc backend is portable; bound/sim timing is
+    // Linux-x86-64 only. Plumbing (resolve, matched_free_frac) still validates.
+    const bool can_time = (backend == Backend::Glibc);
+#endif
+
+    if (!can_time) {
+        fprintf(stderr, "bound_bench: backend=%s timing skipped on this host "
+                        "(JIT is x86-64); emitting matched_free_frac only\n",
+                backend_name);
+        printf("%s\t%s\t0\t0\t%ld\t%.4f\n",
+               backend_name, label.c_str(), peak_rss_kb(), matched_frac);
+        return 0;
+    }
+
+    long rss_before = peak_rss_kb();
+
+    // A few warmup passes populate freelists/segments (bound/sim) and grow the
+    // heap (glibc) so the timed passes measure steady state, not first-touch.
+    const int warmup = 3;
+    for (int p = 0; p < warmup; ++p) run_pass(backend, r.ops, live);
+
+    std::vector<double> per_alloc_ns;
+    per_alloc_ns.reserve(passes);
+    for (int p = 0; p < passes; ++p) {
+        double t0 = now_ns();
+        run_pass(backend, r.ops, live);
+        double t1 = now_ns();
+        per_alloc_ns.push_back((t1 - t0) / static_cast<double>(r.n_allocs));
+    }
+
+    long rss_after = peak_rss_kb();
+    long rss_delta = rss_after - rss_before;
+    if (rss_delta < 0) rss_delta = 0;
+
+    std::sort(per_alloc_ns.begin(), per_alloc_ns.end());
+    size_t n = per_alloc_ns.size();
+    double p50 = (n % 2) ? per_alloc_ns[n / 2]
+                         : 0.5 * (per_alloc_ns[n / 2 - 1] + per_alloc_ns[n / 2]);
+    double mean = 0.0;
+    for (double x : per_alloc_ns) mean += x;
+    mean /= static_cast<double>(n);
+    double var = 0.0;
+    for (double x : per_alloc_ns) var += (x - mean) * (x - mean);
+    var = (n > 1) ? var / static_cast<double>(n - 1) : 0.0;
+    double ci95 = 1.96 * std::sqrt(var) / std::sqrt(static_cast<double>(n));
+
+    fprintf(stderr,
+        "bound_bench: p50=%.3f ns/alloc  ci95=%.3f  rss_delta=%ld kB "
+        "(%ld->%ld)  passes=%d\n",
+        p50, ci95, rss_delta, rss_before, rss_after, passes);
+
+    printf("%s\t%s\t%.3f\t%.3f\t%ld\t%.4f\n",
+           backend_name, label.c_str(), p50, ci95, rss_delta, matched_frac);
+    return 0;
+}

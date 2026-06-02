@@ -38,6 +38,17 @@ set(TBJIT_SOURCES
   src/seg/segment.cpp
 )
 
+# Absolute-path source list with the LD_PRELOAD trampoline removed, for offline
+# tools that must NOT interpose malloc process-wide (e.g. the bound-replay
+# timing harness, which needs pure libc for its glibc baseline and zero self-
+# interception during timing). Such tools supply their own g_real_malloc shim.
+set(TBJIT_NOTRAMP_SOURCES "")
+foreach(_s IN LISTS TBJIT_SOURCES)
+  if(NOT _s MATCHES "trampoline\\.cpp$")
+    list(APPEND TBJIT_NOTRAMP_SOURCES "${CMAKE_SOURCE_DIR}/${_s}")
+  endif()
+endforeach()
+
 set(TBJIT_COMPILE_OPTIONS -Wall -Wextra -fno-exceptions -fno-rtti)
 
 add_library(tbjit SHARED ${TBJIT_SOURCES})
