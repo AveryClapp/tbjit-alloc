@@ -19,6 +19,42 @@ std::atomic<SegmentHeader*> g_index[MAX_SEGMENTS];
 std::atomic<size_t>         g_index_count{0};
 pthread_mutex_t             g_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Pagemap: one bit per 2 MiB-aligned region of the address space, marking tbjit
+// segments. Makes is_managed() an O(1) atomic bit test on the free hot path
+// instead of an O(#segments) linear scan over g_index, and it never
+// dereferences the candidate pointer (so it is safe on libc pointers whose
+// 2 MiB-aligned base may be unmapped). mmap'd (16 MiB virtual) and lazily paged:
+// only the words covering real segment addresses become resident. Lock-free:
+// readers do an atomic load; register/unregister do atomic fetch_or/fetch_and.
+// Standard x86-64 user VA is <= 2^47 < 2^48, so addr>>21 always fits.
+constexpr unsigned SEG_SHIFT = 21;                            // 2 MiB
+constexpr size_t   PM_SLOTS  = size_t(1) << (48 - SEG_SHIFT); // 2^27 regions
+constexpr size_t   PM_WORDS  = PM_SLOTS / 64;                 // 16 MiB of words
+
+std::atomic<uint64_t>* pagemap() {
+    static std::atomic<uint64_t>* pm = []() -> std::atomic<uint64_t>* {
+        int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+        flags |= MAP_NORESERVE;
+#endif
+        void* m = mmap(nullptr, PM_WORDS * sizeof(uint64_t),
+                       PROT_READ | PROT_WRITE, flags, -1, 0);
+        return (m == MAP_FAILED) ? nullptr
+                                 : static_cast<std::atomic<uint64_t>*>(m);
+    }();
+    return pm;
+}
+
+void pagemap_mark(const void* seg, bool set) {
+    std::atomic<uint64_t>* pm = pagemap();
+    if (!pm) return;
+    size_t bit = reinterpret_cast<uintptr_t>(seg) >> SEG_SHIFT;
+    if (bit >= PM_SLOTS) return;
+    uint64_t mask = uint64_t(1) << (bit & 63);
+    if (set) pm[bit >> 6].fetch_or(mask, std::memory_order_release);
+    else     pm[bit >> 6].fetch_and(~mask, std::memory_order_release);
+}
+
 void* aligned_mmap_2mib() {
     // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
     // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
@@ -133,6 +169,9 @@ void free_segment(SegmentHeader* seg) {
 }
 
 void register_segment(SegmentHeader* seg) {
+    // Mark the pagemap regardless of the g_index cap, so is_managed stays
+    // correct even past MAX_SEGMENTS (those segments just aren't reaper-tracked).
+    pagemap_mark(seg, true);
     pthread_mutex_lock(&g_index_mutex);
     size_t n = g_index_count.load(std::memory_order_relaxed);
     if (n < MAX_SEGMENTS) {
@@ -143,6 +182,7 @@ void register_segment(SegmentHeader* seg) {
 }
 
 void unregister_segment(SegmentHeader* seg) {
+    pagemap_mark(seg, false);
     pthread_mutex_lock(&g_index_mutex);
     size_t n = g_index_count.load(std::memory_order_relaxed);
     for (size_t i = 0; i < n; ++i) {
@@ -159,12 +199,11 @@ void unregister_segment(SegmentHeader* seg) {
 
 bool is_managed(const SegmentHeader* seg) {
     if (!seg) return false;
-    size_t n = g_index_count.load(std::memory_order_acquire);
-    for (size_t i = 0; i < n; ++i) {
-        if (g_index[i].load(std::memory_order_relaxed) == seg)
-            return true;
-    }
-    return false;
+    std::atomic<uint64_t>* pm = pagemap();
+    if (!pm) return false;
+    size_t bit = reinterpret_cast<uintptr_t>(seg) >> SEG_SHIFT;
+    if (bit >= PM_SLOTS) return false;
+    return (pm[bit >> 6].load(std::memory_order_acquire) >> (bit & 63)) & 1u;
 }
 
 size_t segment_count() { return g_index_count.load(std::memory_order_acquire); }
