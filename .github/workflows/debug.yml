@@ -31,10 +31,8 @@ jobs:
           node --version
           gdb --version | head -1
 
-      - name: node_bench under gdb (SIGSEGV)
-        if: always()
+      - name: Write node fixture
         run: |
-          PRE="$PWD/build/libtbjit.so"
           cat > /tmp/work.js <<'JS'
           let sink = 0;
           for (let round = 0; round < 300; round++) {
@@ -46,17 +44,30 @@ jobs:
           }
           process.stdout.write(String(sink) + "\n");
           JS
+
+      - name: Bisection — no compilation (STABLE_WINDOWS huge -> pure passthrough)
+        if: always()
+        run: |
+          PRE="$PWD/build/libtbjit.so"
+          set +e
+          LD_PRELOAD="$PRE" TBJIT_DUMP=1 TBJIT_STABLE_WINDOWS=100000000 \
+            node /tmp/work.js >/dev/null 2>nocompile.err
+          echo "no-compile exit=$?" | tee -a bisect.log
+          echo "--- stderr tail ---" | tee -a bisect.log
+          tail -5 nocompile.err | tee -a bisect.log
+
+      - name: Baseline — default (expected SIGSEGV) under gdb
+        if: always()
+        run: |
+          PRE="$PWD/build/libtbjit.so"
           gdb -batch \
             -ex "set exec-wrapper env LD_PRELOAD=$PRE TBJIT_DUMP=1" \
             -ex run \
             -ex "echo \n==== BACKTRACE (node) ====\n" \
             -ex "bt" \
-            -ex "echo \n==== ALL THREADS ====\n" \
-            -ex "thread apply all bt" \
             -ex "echo \n==== FAULTING FRAME INFO ====\n" \
-            -ex "info registers rip" \
             -ex "info symbol \$rip" \
-            --args node /tmp/work.js 2>&1 | tee node_bt.log | tail -200
+            --args node /tmp/work.js 2>&1 | tee node_bt.log | tail -60
 
       - name: Upload logs
         if: always()
@@ -65,4 +76,6 @@ jobs:
           name: crash-backtraces-${{ github.sha }}
           path: |
             node_bt.log
+            bisect.log
+            nocompile.err
           retention-days: 30
