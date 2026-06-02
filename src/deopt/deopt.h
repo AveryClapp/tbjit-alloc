@@ -6,6 +6,13 @@ namespace tbjit::deopt {
 
 void init();
 
+// Enable/disable deopt (default enabled). When disabled, handle() is a no-op:
+// no dispatch revert, no queue, no mutex. Used by the offline bound-replay
+// harness to model a perfect never-deopting picker (the oracle ceiling) so
+// compiled routines stay installed for the whole replay instead of bleeding
+// away to the generic path (which the live system avoids by re-specializing).
+void set_enabled(bool on);
+
 // Called by a compiled routine when its guard fails. The emitted deopt
 // epilogue passes a ground-truth reason (3rd arg, edx) so the picker records
 // *why* the site deopted instead of inferring it from the strategy.

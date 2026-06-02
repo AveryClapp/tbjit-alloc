@@ -415,6 +415,16 @@ int main(int argc, char** argv) {
                                      // the picture and leave compilation enabled
     tbjit::deopt::init();
 
+    // Oracle ceiling for the specialized backends: never deopt, so routines
+    // stay installed for the entire replay (the live system sustains its JIT
+    // yield by re-specializing on the background thread; a synchronous replay
+    // cannot, so without this the routines bleed away to libc and we end up
+    // timing glibc, not the allocator). Models a perfect, never-deopting picker.
+    if (backend != Backend::Glibc) {
+        tbjit::analysis::set_oracle_mode(true);  // no analysis-side deopt
+        tbjit::deopt::set_enabled(false);        // no runtime revert
+    }
+
     // Learning pass: drive every event through the offline analyzer so the
     // picker compiles + installs routines exactly as it would online. glibc
     // needs no learning. Done on this (the timing) thread so the JIT routines'
@@ -424,9 +434,9 @@ int main(int argc, char** argv) {
     }
 
     // bound: resolve each alloc's routine now that dispatch is populated, so the
-    // timed loop calls it directly (no per-call lookup). Refreshed after every
-    // pass below. sim looks up live (it models the dispatch path); glibc uses
-    // libc malloc.
+    // timed loop calls it directly (no per-call lookup). Stable for the whole
+    // run because deopt is disabled above (routines never revert). sim looks up
+    // live (it models the dispatch path); glibc uses libc malloc.
     if (backend == Backend::Bound) resolve_fns(r.ops);
 
     // The raw event buffer (often >2 GB) is no longer needed; free it before
@@ -464,17 +474,15 @@ int main(int argc, char** argv) {
     long rss_footprint = current_rss_kb() - rss_before;
     if (rss_footprint < 0) rss_footprint = 0;
     reclaim_leaked(backend, r.leaked, live);
-    if (backend == Backend::Bound) resolve_fns(r.ops);
 
     // Latency: warmup then timed passes, reclaiming leaked allocs between each so
     // memory stays bounded (otherwise non-recycling strategies accumulate across
-    // passes and exhaust the segment table / RAM), and refreshing bound's routine
-    // pointers so deopted sites converge to libc instead of restorming the guard.
+    // passes and exhaust the segment table / RAM). bound's op.fn is stable
+    // across passes (deopt disabled => routines never revert), so no refresh.
     const int warmup = 3;
     for (int p = 0; p < warmup; ++p) {
         run_pass(backend, r.ops, live);
         reclaim_leaked(backend, r.leaked, live);
-        if (backend == Backend::Bound) resolve_fns(r.ops);
     }
 
     std::vector<double> per_alloc_ns;
@@ -484,8 +492,7 @@ int main(int argc, char** argv) {
         run_pass(backend, r.ops, live);
         double t1 = now_ns();
         per_alloc_ns.push_back((t1 - t0) / static_cast<double>(r.n_allocs));
-        reclaim_leaked(backend, r.leaked, live);          // untimed
-        if (backend == Backend::Bound) resolve_fns(r.ops); // untimed
+        reclaim_leaked(backend, r.leaked, live);  // untimed
     }
 
 #if defined(__linux__) && defined(__x86_64__)

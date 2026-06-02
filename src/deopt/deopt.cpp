@@ -18,6 +18,7 @@ namespace tbjit::deopt {
 namespace {
 
 std::atomic<uint64_t> g_epoch{0};
+bool                  g_enabled = true;  // see deopt::set_enabled
 
 struct PendingReclaim {
     void*    page;
@@ -64,7 +65,11 @@ void register_thread() {
 
 void init() {}
 
+void set_enabled(bool on) { g_enabled = on; }
+
 void handle(CallSiteID id, void* code_page, analysis::DeoptReason reason) {
+    if (!g_enabled) return;  // oracle ceiling: never revert; routine's emitted
+                             // epilogue falls through to g_real_malloc itself
     dispatch::revert(id);
     pthread_mutex_lock(&g_deopt_mutex);
     if (g_deopt_tail - g_deopt_head < DEOPT_QUEUE_CAP) {
