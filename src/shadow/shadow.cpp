@@ -5,6 +5,12 @@
 #include <cstdlib>
 #include <cstdint>
 #include <pthread.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+
+static inline unsigned shadow_tid() {
+    return static_cast<unsigned>(syscall(SYS_gettid));
+}
 
 // Shadow validator records every JIT-served allocation in an open-addressing
 // hash table keyed by pointer. On free we look the pointer up and erase the
@@ -21,9 +27,10 @@ namespace tbjit::shadow {
 namespace {
 
 struct Entry {
-    void*       ptr;     // null = empty slot
+    void*       ptr;       // null = empty slot
     size_t      size;
     CallSiteID  alloc_id;
+    unsigned    alloc_tid; // tid that produced this live allocation
 };
 
 constexpr size_t TABLE_SIZE = 1u << 17;  // 128k slots — covers ~5460 live * many call sites
@@ -50,13 +57,21 @@ void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
     if ((reinterpret_cast<uintptr_t>(jit_ptr) % alignof(max_align_t)) != 0)
         fail("alloc misaligned", jit_ptr);
 
+    unsigned tid = shadow_tid();
     pthread_mutex_lock(&g_mutex);
     size_t i = hash_ptr(jit_ptr);
     size_t scanned = 0;
     while (g_table[i].ptr != nullptr) {
         if (g_table[i].ptr == jit_ptr) {
+            Entry e = g_table[i];
             pthread_mutex_unlock(&g_mutex);
-            fail("alloc returned a pointer that's already tracked", jit_ptr);
+            fprintf(stderr,
+                "tbjit shadow: DUP ptr=%p  existing{size=%zu id=%u tid=%u}  "
+                "new{size=%zu id=%u tid=%u}  same_thread=%d same_site=%d\n",
+                jit_ptr, e.size, e.alloc_id, e.alloc_tid,
+                size, id, tid,
+                (e.alloc_tid == tid), (e.alloc_id == id));
+            std::abort();
         }
         i = (i + 1) & (TABLE_SIZE - 1);
         if (++scanned >= TABLE_SIZE) {
@@ -64,7 +79,7 @@ void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
             fail("shadow table full", jit_ptr);
         }
     }
-    g_table[i] = {jit_ptr, size, id};
+    g_table[i] = {jit_ptr, size, id, tid};
     pthread_mutex_unlock(&g_mutex);
 }
 
