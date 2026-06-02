@@ -1,0 +1,77 @@
+name: Bound-replay bench
+
+# Elevation experiment (docs/plans/2026-06-02-bound-replay-bench.md, Comparison
+# A): capture complete unspecialized traces for the corpus under
+# TBJIT_TRACE_ONLY, then replay them through tbjit_bound_bench against the
+# glibc / bound / sim backends with zero LD_PRELOAD interposition. Isolates the
+# specialized-allocator benefit from the trampoline dispatch tax.
+#
+# LD_PRELOAD is a no-op on macOS, so CI is the only venue. Manual dispatch only:
+# the capture is heavy (every alloc is recorded to disk) and the numbers feed
+# the paper, not per-push gating.
+
+on:
+  workflow_dispatch:
+    inputs:
+      passes:
+        description: 'Timed passes per backend (p50 over this many)'
+        required: false
+        default: '15'
+        type: string
+
+jobs:
+  boundbench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential util-linux \
+            openssl perl g++
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel "$(nproc)"
+
+      - name: Capture traces + bound-replay bench
+        env:
+          BOUND_BENCH_PASSES: ${{ inputs.passes }}
+        run: |
+          mkdir -p bench-out
+          bash bench/realworkload/bound_bench_suite.sh build bench-out/boundbench \
+            | tee bench-out/boundbench-run.log
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## Bound-replay results (Comparison A)"
+            echo
+            if [ -s bench-out/boundbench/bound_results.tsv ]; then
+              echo '| backend | workload | p50_ns | ci95_ns | peak_rss_kb | matched_free_frac |'
+              echo '|---|---|--:|--:|--:|--:|'
+              tail -n +2 bench-out/boundbench/bound_results.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
+            else
+              echo "_no results TSV produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boundbench-${{ github.sha }}
+          # Raw traces are deleted by the suite (large, regenerable); this is
+          # the TSV + per-backend stderr logs + run log.
+          path: |
+            bench-out/boundbench/
+            bench-out/boundbench-run.log
+          retention-days: 90
