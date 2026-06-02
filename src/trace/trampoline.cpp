@@ -10,6 +10,7 @@
 #include "common.h"
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <pthread.h>
 
@@ -67,11 +68,14 @@ thread_local uint64_t                 tl_ic_gen = 0;
 using free_fn = void (*)(void*);
 
 free_fn real_free = nullptr;
+void* (*g_real_realloc)(void*, size_t) = nullptr;
 
 __attribute__((constructor))
 void tbjit_init() {
     g_real_malloc = reinterpret_cast<void* (*)(size_t)>(dlsym(RTLD_NEXT, "malloc"));
     real_free      = reinterpret_cast<free_fn>(dlsym(RTLD_NEXT, "free"));
+    g_real_realloc = reinterpret_cast<void* (*)(void*, size_t)>(
+        dlsym(RTLD_NEXT, "realloc"));
     tbjit::trace::init();
     tbjit::dispatch::init();
     tbjit::deopt::init();
@@ -224,6 +228,36 @@ void free(void* ptr) {
     }
 
     reentrancy_guard = false;
+}
+
+void* realloc(void* ptr, size_t size) {
+    if (!g_real_realloc) return nullptr;  // pre-init: dlsym not yet complete
+    if (g_shutting_down.load(std::memory_order_acquire))
+        return g_real_realloc(ptr, size);
+    if (reentrancy_guard) return g_real_realloc(ptr, size);
+    if (ptr == nullptr) return malloc(size);  // realloc(NULL, n) == malloc(n)
+
+    tbjit::seg::SegmentHeader* s = tbjit::seg::of(ptr);
+    if (tbjit::seg::is_managed(s)) {
+        if (size == 0) { free(ptr); return nullptr; }  // realloc(p,0): free
+        // tbjit-managed: libc realloc would abort on this pointer. Migrate via
+        // our own interposed malloc/free (allocate-copy-free) — we can't grow
+        // in place since a segment's chunks are fixed once carved. Bound the
+        // copy by the chunk capacity for fixed-size-class strategies; for
+        // variable-size strategies (chunk_size == 0) bound by the segment
+        // payload remaining after ptr so we never read past the mapped region.
+        // Either way min(size, cap) also guarantees we never overrun `out`.
+        size_t cap = s->chunk_size > 0
+            ? static_cast<size_t>(s->chunk_size)
+            : static_cast<size_t>(tbjit::seg::segment_end(s) -
+                                  static_cast<uint8_t*>(ptr));
+        size_t n = size < cap ? size : cap;
+        void* out = malloc(size);  // re-enters our trampoline (guard is clear)
+        if (out) std::memcpy(out, ptr, n);
+        free(ptr);                 // recycles the managed chunk
+        return out;
+    }
+    return g_real_realloc(ptr, size);  // libc-managed: pass straight through
 }
 
 } // extern "C"

@@ -94,4 +94,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         $<TARGET_FILE:int_hello>
     )
   endif()
+
+  # realloc interposer: a realloc of a tbjit-managed chunk must migrate the
+  # data instead of reaching libc realloc (which aborts on the unfamiliar
+  # pointer — the gcc/libgmp crash). TBJIT_STABLE_WINDOWS=3 makes the site
+  # compile fast. Linux only (LD_PRELOAD interposition is a no-op on macOS).
+  add_executable(int_realloc_managed realloc_managed.cpp)
+  add_test(
+    NAME int_realloc_managed
+    COMMAND ${CMAKE_COMMAND} -E env
+      LD_PRELOAD=$<TARGET_FILE:tbjit>
+      TBJIT_STABLE_WINDOWS=3
+      $<TARGET_FILE:int_realloc_managed>
+  )
+  set_tests_properties(int_realloc_managed PROPERTIES
+    PASS_REGULAR_EXPRESSION "OK"
+  )
 endif()
