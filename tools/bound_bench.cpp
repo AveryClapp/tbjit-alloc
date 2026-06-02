@@ -233,6 +233,34 @@ long peak_rss_kb() {
 #endif
 }
 
+// Current (not high-water) resident set. ru_maxrss is useless for the one-pass
+// footprint because the multi-GB learning pass already set the process peak;
+// current RSS drops after we free the event buffer, then rises with the
+// allocator's own pages during the pass.
+long current_rss_kb() {
+#if defined(__linux__)
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    long total_pages = 0, rss_pages = 0;
+    int got = fscanf(f, "%ld %ld", &total_pages, &rss_pages);
+    fclose(f);
+    if (got != 2) return 0;
+    return rss_pages * (sysconf(_SC_PAGESIZE) / 1024);
+#else
+    return peak_rss_kb();  // macOS dev fallback (not the data venue)
+#endif
+}
+
+// Re-point each alloc op at its site's currently-installed routine. Run after
+// the learning pass and again after each replay pass: sites that deopt during
+// replay revert to null here, so the bound backend stops calling a stale routine
+// that would deopt (mutex-locked) on every subsequent call. Keeps the timed
+// passes a clean pure-fast-path-or-libc measurement.
+inline void resolve_fns(std::vector<Op>& ops) {
+    for (Op& op : ops)
+        if (op.kind == OpKind::Alloc) op.fn = dispatch::lookup(op.id);
+}
+
 double now_ns() {
     struct timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -341,13 +369,11 @@ int main(int argc, char** argv) {
         for (const AllocEvent& ev : events) tbjit::analysis::process_event(ev);
     }
 
-    // bound: pre-resolve each alloc's routine now that dispatch is populated, so
-    // the timed loop calls it directly (no per-call lookup). sim looks up live
-    // (it is modeling the dispatch path); glibc uses libc malloc.
-    if (backend == Backend::Bound) {
-        for (Op& op : r.ops)
-            if (op.kind == OpKind::Alloc) op.fn = tbjit::dispatch::lookup(op.id);
-    }
+    // bound: resolve each alloc's routine now that dispatch is populated, so the
+    // timed loop calls it directly (no per-call lookup). Refreshed after every
+    // pass below. sim looks up live (it models the dispatch path); glibc uses
+    // libc malloc.
+    if (backend == Backend::Bound) resolve_fns(r.ops);
 
     // The raw event buffer (often >2 GB) is no longer needed; free it before
     // timing so it does not inflate the RSS baseline or crowd the allocator.
@@ -379,19 +405,22 @@ int main(int argc, char** argv) {
     // reflects the real peak live set, not the reclaim-bounded steady state the
     // timed passes below run in). One pass mirrors the original process, which
     // survived this footprint live.
-    long rss_before = peak_rss_kb();
+    long rss_before = current_rss_kb();
     run_pass(backend, r.ops, live);
-    long rss_footprint = peak_rss_kb() - rss_before;
+    long rss_footprint = current_rss_kb() - rss_before;
     if (rss_footprint < 0) rss_footprint = 0;
     reclaim_leaked(backend, r.leaked, live);
+    if (backend == Backend::Bound) resolve_fns(r.ops);
 
     // Latency: warmup then timed passes, reclaiming leaked allocs between each so
     // memory stays bounded (otherwise non-recycling strategies accumulate across
-    // passes and exhaust the segment table / RAM).
+    // passes and exhaust the segment table / RAM), and refreshing bound's routine
+    // pointers so deopted sites converge to libc instead of restorming the guard.
     const int warmup = 3;
     for (int p = 0; p < warmup; ++p) {
         run_pass(backend, r.ops, live);
         reclaim_leaked(backend, r.leaked, live);
+        if (backend == Backend::Bound) resolve_fns(r.ops);
     }
 
     std::vector<double> per_alloc_ns;
@@ -401,7 +430,8 @@ int main(int argc, char** argv) {
         run_pass(backend, r.ops, live);
         double t1 = now_ns();
         per_alloc_ns.push_back((t1 - t0) / static_cast<double>(r.n_allocs));
-        reclaim_leaked(backend, r.leaked, live);  // untimed
+        reclaim_leaked(backend, r.leaked, live);          // untimed
+        if (backend == Backend::Bound) resolve_fns(r.ops); // untimed
     }
 
     std::sort(per_alloc_ns.begin(), per_alloc_ns.end());
