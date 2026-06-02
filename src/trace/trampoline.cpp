@@ -91,12 +91,34 @@ inline bool is_bootstrap(const void* p) {
     return p >= g_bootstrap && p < g_bootstrap + sizeof(g_bootstrap);
 }
 
+// Set at the END of tbjit_init. Until then the trampoline's instrumented path
+// (dispatch / trace / deopt / shadow) is not yet set up, so every malloc/free/
+// realloc — whether from another library's _dl_init constructor or from tbjit's
+// own initialization — bypasses instrumentation and goes straight to the real
+// allocator.
+std::atomic<bool> g_initialized{false};
+
+// Resolve the real allocator entry points lazily. tbjit's constructor normally
+// does this, but other libraries' constructors can call malloc during _dl_init
+// before tbjit's constructor runs. dlsym itself may call malloc/calloc, which
+// re-enters the trampoline; reentrancy_guard makes that nested call fall back to
+// the bootstrap arena (only a handful of small allocations) instead of recursing.
+void resolve_real_allocators() {
+    if (reentrancy_guard) return;        // mid-dlsym re-entry: leave pointers null
+    reentrancy_guard = true;
+    if (!g_real_malloc)
+        g_real_malloc = reinterpret_cast<void* (*)(size_t)>(dlsym(RTLD_NEXT, "malloc"));
+    if (!real_free)
+        real_free = reinterpret_cast<free_fn>(dlsym(RTLD_NEXT, "free"));
+    if (!g_real_realloc)
+        g_real_realloc = reinterpret_cast<void* (*)(void*, size_t)>(
+            dlsym(RTLD_NEXT, "realloc"));
+    reentrancy_guard = false;
+}
+
 __attribute__((constructor))
 void tbjit_init() {
-    g_real_malloc = reinterpret_cast<void* (*)(size_t)>(dlsym(RTLD_NEXT, "malloc"));
-    real_free      = reinterpret_cast<free_fn>(dlsym(RTLD_NEXT, "free"));
-    g_real_realloc = reinterpret_cast<void* (*)(void*, size_t)>(
-        dlsym(RTLD_NEXT, "realloc"));
+    resolve_real_allocators();
     tbjit::trace::init();
     tbjit::dispatch::init();
     tbjit::deopt::init();
@@ -104,6 +126,8 @@ void tbjit_init() {
     tbjit::analysis::start_background_thread();
     const char* trace_path = getenv("TBJIT_TRACE");
     if (trace_path) tbjit::trace::writer_open(trace_path);
+    // Subsystems are up: enable the instrumented allocation path.
+    g_initialized.store(true, std::memory_order_release);
 }
 
 __attribute__((destructor))
@@ -124,7 +148,14 @@ void tbjit_fini() {
 extern "C" {
 
 void* malloc(size_t size) {
-    if (!g_real_malloc) return bootstrap_alloc(size);  // pre-init: serve from bootstrap arena
+    if (__builtin_expect(!g_initialized.load(std::memory_order_acquire), 0)) {
+        // Pre-init (another lib's _dl_init ctor, or tbjit's own init): resolve
+        // the real allocator lazily and serve directly, bypassing the not-yet-
+        // ready instrumented path. Only the dlsym re-entry uses the bootstrap
+        // arena, so init-time allocation volume is unbounded-safe.
+        if (!g_real_malloc) resolve_real_allocators();
+        return g_real_malloc ? g_real_malloc(size) : bootstrap_alloc(size);
+    }
     if (g_shutting_down.load(std::memory_order_acquire))
         return g_real_malloc(size);       // post-fini: bypass torn-down state
     if (reentrancy_guard) return g_real_malloc(size);
@@ -161,7 +192,13 @@ void* malloc(size_t size) {
 }
 
 void free(void* ptr) {
-    if (is_bootstrap(ptr)) return;  // pre-init bootstrap chunk: never reaches libc
+    if (is_bootstrap(ptr)) return;  // bootstrap chunk: never reaches libc
+    if (__builtin_expect(!g_initialized.load(std::memory_order_acquire), 0)) {
+        // Pre-init: no segment/dispatch state to consult; hand to libc directly.
+        if (!real_free) resolve_real_allocators();
+        if (real_free) real_free(ptr);
+        return;
+    }
     if (g_shutting_down.load(std::memory_order_acquire)) {
         // Post-fini: can't safely consult segment/dispatch state. If ptr
         // came from a tbjit-managed segment the underlying mmap'd region
@@ -266,8 +303,12 @@ void* realloc(void* ptr, size_t size) {
         }
         return out;
     }
-    if (!g_real_realloc)                  // pre-init: serve from bootstrap arena
-        return ptr ? ptr : bootstrap_alloc(size);
+    if (__builtin_expect(!g_initialized.load(std::memory_order_acquire), 0)) {
+        // Pre-init: no segment state yet; resolve and pass straight to libc.
+        if (!g_real_realloc) resolve_real_allocators();
+        if (g_real_realloc) return g_real_realloc(ptr, size);
+        return ptr ? ptr : bootstrap_alloc(size);  // mid-dlsym fallback
+    }
     if (g_shutting_down.load(std::memory_order_acquire))
         return g_real_realloc(ptr, size);
     if (reentrancy_guard) return g_real_realloc(ptr, size);
