@@ -130,6 +130,24 @@ jobs:
           cat tlsprobe.build.log | tee -a tls_probe.log
           /tmp/tlsprobe 2>&1 | tee -a tls_probe.log
 
+      - name: Bisection — single-threaded V8 (no concurrent marking)
+        if: always()
+        run: |
+          PRE="$PWD/build/libtbjit.so"
+          set +e
+          LD_PRELOAD="$PRE" TBJIT_DUMP=1 \
+            node --no-concurrent-marking --no-concurrent-sweeping \
+                 --no-concurrent-recompilation \
+            /tmp/work.js >/dev/null 2>nocc.err
+          echo "no-concurrent-marking exit=$?" | tee -a bisect.log
+          grep -i "pthread_create\|Segmentation\|via JIT" nocc.err | tee -a bisect.log
+          echo "---" | tee -a bisect.log
+          LD_PRELOAD="$PRE" TBJIT_DUMP=1 \
+            node --single-threaded /tmp/work.js >/dev/null 2>single.err
+          echo "single-threaded exit=$?" | tee -a bisect.log
+          grep -i "pthread_create\|Segmentation\|via JIT" single.err | tee -a bisect.log
+          echo "===" | tee -a bisect.log
+
       - name: Baseline — default (expected SIGSEGV) under gdb
         if: always()
         run: |
