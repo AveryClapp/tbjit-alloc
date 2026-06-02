@@ -323,6 +323,9 @@ int main(int argc, char** argv) {
     }
 
     tbjit::alloc::init();
+    tbjit::dispatch::init();         // allocates the dispatch table; the live
+                                     // system does this in the trampoline ctor,
+                                     // which this tool deliberately excludes
     tbjit::analysis::init_state();   // NOT init(): keep TBJIT_TRACE_ONLY out of
                                      // the picture and leave compilation enabled
     tbjit::deopt::init();
