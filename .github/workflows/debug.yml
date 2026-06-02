@@ -69,18 +69,20 @@ jobs:
             echo "---" | tee -a bisect.log
           done
 
-      - name: Shadow validator — force bump (simplest), report violated invariant
+      - name: Shadow validator — managed-only, report violated invariant
         if: always()
         run: |
           SHADOW="$PWD/build/libtbjit_shadow.so"
           set +e
-          LD_PRELOAD="$SHADOW" TBJIT_FORCE_STRATEGY=bump \
-            node /tmp/work.js >/dev/null 2>shadow_bump.err
-          echo "shadow force=bump exit=$?" | tee -a bisect.log
-          echo "--- shadow stderr (tbjit shadow: ... lines) ---" | tee -a bisect.log
-          grep "tbjit shadow:" shadow_bump.err | head | tee -a bisect.log
-          echo "--- full tail ---" | tee -a bisect.log
-          tail -8 shadow_bump.err | tee -a bisect.log
+          for mode in bump default; do
+            if [ "$mode" = default ]; then ENV=""; else ENV="TBJIT_FORCE_STRATEGY=$mode"; fi
+            env LD_PRELOAD="$SHADOW" $ENV node /tmp/work.js >/dev/null 2>"shadow_$mode.err"
+            echo "shadow mode=$mode exit=$?" | tee -a bisect.log
+            grep "tbjit shadow:" "shadow_$mode.err" | head | tee -a bisect.log
+            echo "--- tail ---" | tee -a bisect.log
+            tail -5 "shadow_$mode.err" | tee -a bisect.log
+            echo "===" | tee -a bisect.log
+          done
 
       - name: TLS-offset invariance probe (root-cause confirmation)
         if: always()
@@ -154,5 +156,6 @@ jobs:
             force_freelist.err
             force_arena.err
             shadow_bump.err
+            shadow_default.err
             tls_probe.log
           retention-days: 30

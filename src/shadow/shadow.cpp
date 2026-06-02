@@ -55,6 +55,12 @@ size_t hash_ptr(void* p) {
 
 void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
     if (!jit_ptr) fail("alloc returned null", jit_ptr);
+    // Only validate tbjit-served (JIT-managed) allocations. Generic
+    // g_real_malloc pointers are glibc's to track; the trampoline's
+    // reentrancy-guard free branch can skip validate_free for them, which
+    // would otherwise leave stale entries and spurious DUP reports when glibc
+    // legitimately reuses an address.
+    if (!tbjit::seg::is_managed(tbjit::seg::of(jit_ptr))) return;
     if ((reinterpret_cast<uintptr_t>(jit_ptr) % alignof(max_align_t)) != 0)
         fail("alloc misaligned", jit_ptr);
 
