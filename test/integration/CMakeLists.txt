@@ -117,8 +117,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # constructor resolves the real allocator -- the ordering that crashed
   # libselinux (find_so) and libLLVM (clang++). A pre-fix tbjit returns NULL and
   # the probe _exit(33)s; the bootstrap-arena fix lets it print PROBE_CTOR_OK.
-  add_library(ctorprobe SHARED ctorprobe.c)
-  add_executable(int_ctor_alloc ctor_probe_main.c)
+  add_library(ctorprobe SHARED ctorprobe.cpp)
+  add_executable(int_ctor_alloc ctor_probe_main.cpp)
   target_link_libraries(int_ctor_alloc PRIVATE ctorprobe)
   # Keep the probe as a DT_NEEDED entry even though main calls none of its
   # symbols, so its constructor actually runs.
