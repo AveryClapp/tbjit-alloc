@@ -49,6 +49,15 @@ pthread_t             g_thread;
 // live allocator. Not atomic: replay is single-threaded.
 bool                  g_oracle_mode = false;
 
+// Trace-only capture mode (TBJIT_TRACE_ONLY): when set, no site ever
+// specializes — advance_prespec keeps cycling PreSpec windows but never
+// compiles/installs, so every alloc stays on the generic (recorded) path and
+// the captured trace is a complete, unspecialized event stream. All
+// specialization decisions then happen offline in the bound-replay harness.
+// Read once in init(); off in the offline tools (which call init_state()
+// directly and *want* to compile).
+bool                  g_trace_only = false;
+
 // Strategy override: TBJIT_FORCE_STRATEGY={bump,freelist} overrides the
 // is_monomorphic-based candidate pick. Read once on first call to avoid
 // re-scanning the env on every stable transition.
@@ -85,8 +94,10 @@ void advance_prespec(CallSiteSummary* s) {
             // Blacklisted sites stay in PreSpec forever — analysis still
             // runs but compile() is skipped. Avoids pathological recompile
             // loops on call sites that keep deopting (truly polymorphic,
-            // size-changing over time, etc).
-            if (s->blacklisted) {
+            // size-changing over time, etc). Trace-only capture mode rides
+            // the same path: never compile, so the generic record path stays
+            // live for the entire stream.
+            if (s->blacklisted || g_trace_only) {
                 s->stable_windows = 0;
                 s->active = 1 - s->active;
                 s->windows[s->active].reset();
@@ -293,6 +304,7 @@ void init() {
         uint32_t n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         if (n > 0) g_deopt_blacklist_limit = n;
     }
+    g_trace_only = (std::getenv("TBJIT_TRACE_ONLY") != nullptr);
     init_state();
 }
 
@@ -433,6 +445,7 @@ DeoptReason get_deopt_reason(CallSiteID id) {
 
 void set_oracle_mode(bool on) { g_oracle_mode = on; }
 bool oracle_mode()            { return g_oracle_mode; }
+bool trace_only()             { return g_trace_only; }
 
 OracleResult capturable() {
     OracleResult r{0, 0};

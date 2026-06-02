@@ -129,6 +129,11 @@ void     reset_call_site(CallSiteID id, DeoptReason reason = DeoptReason::Other)
 // summaries (events of all Compiled sites / all events).
 void set_oracle_mode(bool on);
 bool oracle_mode();
+
+// Trace-only capture mode (TBJIT_TRACE_ONLY, read once in init()). When set, no
+// site specializes — the trampoline's generic record path stays live for every
+// alloc, yielding a complete unspecialized event stream for offline replay.
+bool trace_only();
 struct OracleResult { uint64_t total_events; uint64_t captured_events; };
 OracleResult capturable();
 void     run();  // background thread entry point (Task 6)
