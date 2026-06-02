@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -49,7 +50,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <execinfo.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 // --- trampoline-shim globals (trampoline.cpp excluded from this tool) -------
 // codegen embeds g_real_malloc as the JIT routines' fallback and the bound/sim
@@ -233,6 +236,20 @@ double now_ns() {
     return static_cast<double>(ts.tv_sec) * 1e9 + static_cast<double>(ts.tv_nsec);
 }
 
+// Async-signal-safe backtrace on a fault in the JIT execution path. JIT pages
+// have no symbols (raw addresses), but the C++ caller frames symbolize with
+// -rdynamic, which localizes the crash (e.g. a slow-init refill vs free_managed
+// vs the emitted routine itself).
+extern "C" void crash_handler(int sig) {
+    void* bt[64];
+    int n = backtrace(bt, 64);
+    const char msg[] = "\n*** bound_bench caught fatal signal; backtrace:\n";
+    ssize_t w = write(2, msg, sizeof(msg) - 1);
+    (void)w;
+    backtrace_symbols_fd(bt, n, 2);
+    _exit(128 + sig);
+}
+
 int usage(const char* a0) {
     fprintf(stderr,
         "usage: %s <trace> [--backend glibc|bound|sim] [--passes N] "
@@ -243,6 +260,9 @@ int usage(const char* a0) {
 } // namespace
 
 int main(int argc, char** argv) {
+    signal(SIGSEGV, crash_handler);
+    signal(SIGABRT, crash_handler);
+
     const char* trace_path = nullptr;
     Backend backend = Backend::Bound;
     const char* backend_name = "bound";

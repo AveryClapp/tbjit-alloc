@@ -13,3 +13,5 @@ add_executable(tbjit_bound_bench bound_bench.cpp)
 target_include_directories(tbjit_bound_bench PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(tbjit_bound_bench PRIVATE tbjit_notramp_obj)
 target_compile_options(tbjit_bound_bench PRIVATE -Wall -Wextra -fno-exceptions -fno-rtti)
+# -rdynamic so the crash-handler backtrace symbolizes tbjit-internal frames.
+target_link_options(tbjit_bound_bench PRIVATE -rdynamic)
