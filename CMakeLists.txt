@@ -65,6 +65,15 @@ add_library(tbjit_obj OBJECT ${TBJIT_SOURCES})
 target_include_directories(tbjit_obj PRIVATE src)
 target_compile_options(tbjit_obj PRIVATE ${TBJIT_COMPILE_OPTIONS})
 
+# Same internals minus the LD_PRELOAD trampoline, for offline tools that must
+# not interpose malloc process-wide (see TBJIT_NOTRAMP_SOURCES). Built as an
+# OBJECT library so codegen.cpp's manual __builtin_thread_pointer TLS access is
+# compiled -fPIC like tbjit_obj; compiling those sources straight into an
+# executable picks up -fPIE and fails the GOTTPOFF->TPOFF32 TLS relaxation.
+add_library(tbjit_notramp_obj OBJECT ${TBJIT_NOTRAMP_SOURCES})
+target_include_directories(tbjit_notramp_obj PRIVATE src)
+target_compile_options(tbjit_notramp_obj PRIVATE ${TBJIT_COMPILE_OPTIONS})
+
 enable_testing()
 add_subdirectory(test)
 add_subdirectory(bench)
