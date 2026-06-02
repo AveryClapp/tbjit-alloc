@@ -136,6 +136,39 @@ static void test_deopt_reason_recorded_by_reset() {
            tbjit::analysis::DeoptReason::RegionExhaust);
 }
 
+static void test_oracle_mode_exceeds_online() {
+    // A site that compiles then drifts deopts online (loses capture), but the
+    // no-deopt oracle replay keeps it Compiled and credits its events. The
+    // rigorous oracle's capturable fraction must therefore exceed online's.
+    const tbjit::CallSiteID SITE = 11;
+
+    auto drive = []() {
+        for (int i = 0; i < 11'000; ++i) {
+            tbjit::AllocEvent ev{SITE, 48, 0, 0, nullptr};
+            tbjit::analysis::process_event(ev);
+        }
+        // Drift: online deopts here; oracle stays Compiled.
+        for (int i = 0; i < 3'000; ++i) {
+            tbjit::AllocEvent ev{SITE, 512, 0, 0, nullptr};
+            tbjit::analysis::process_event(ev);
+        }
+    };
+
+    tbjit::analysis::reset_state();
+    tbjit::analysis::set_oracle_mode(false);
+    drive();
+    tbjit::analysis::OracleResult online = tbjit::analysis::capturable();
+
+    tbjit::analysis::reset_state();
+    tbjit::analysis::set_oracle_mode(true);
+    drive();
+    tbjit::analysis::OracleResult oracle = tbjit::analysis::capturable();
+    tbjit::analysis::set_oracle_mode(false);  // restore global
+
+    assert(oracle.total_events == online.total_events);
+    assert(oracle.captured_events > online.captured_events);
+}
+
 int main() {
     test_prespec_triggers_compiled();
     test_prespec_unstable_stays_prespec();
@@ -148,5 +181,6 @@ int main() {
     test_deopt_blacklist_limit_reads_env();
     test_deopt_reason_size_drift();
     test_deopt_reason_recorded_by_reset();
+    test_oracle_mode_exceeds_online();
     return 0;
 }

@@ -121,6 +121,16 @@ Strategy get_candidate_strategy(CallSiteID id);
 LifetimeTag get_lifetime_tag(CallSiteID id);
 DeoptReason get_deopt_reason(CallSiteID id);
 void     reset_call_site(CallSiteID id, DeoptReason reason = DeoptReason::Other);
+
+// Rigorous trace-replay oracle (tools/replay.cpp --oracle). In oracle mode the
+// post-spec drift check never deopts: once a site specializes it stays
+// Compiled, modeling a perfect picker that never blacklists. capturable()
+// reports the upper-bound capturable allocation fraction from the replayed
+// summaries (events of all Compiled sites / all events).
+void set_oracle_mode(bool on);
+bool oracle_mode();
+struct OracleResult { uint64_t total_events; uint64_t captured_events; };
+OracleResult capturable();
 void     run();  // background thread entry point (Task 6)
 void     start_background_thread();
 void     stop_background_thread();

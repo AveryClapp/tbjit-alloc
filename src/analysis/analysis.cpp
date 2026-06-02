@@ -44,6 +44,11 @@ std::atomic<bool>     g_running{false};
 std::atomic<uint64_t> g_events_processed{0};
 pthread_t             g_thread;
 
+// Oracle replay mode: when set, check_postspec never deopts a Compiled site
+// (models a perfect, never-blacklisting picker). Replay-tool only; off in the
+// live allocator. Not atomic: replay is single-threaded.
+bool                  g_oracle_mode = false;
+
 // Strategy override: TBJIT_FORCE_STRATEGY={bump,freelist} overrides the
 // is_monomorphic-based candidate pick. Read once on first call to avoid
 // re-scanning the env on every stable transition.
@@ -189,6 +194,9 @@ void advance_prespec(CallSiteSummary* s) {
 }
 
 void check_postspec(CallSiteSummary* s) {
+    // Oracle replay: a perfect picker never deopts — keep the site Compiled so
+    // its post-warmup events stay captured. Online mode deopts on drift.
+    if (g_oracle_mode) { s->post_window.reset(); return; }
     if (!ks_stable(s->post_window.hist, s->baseline, g_ks_alpha)) {
         s->phase = Phase::Deopt;
         // Ground truth: the KS test rejected the post-spec window against the
@@ -421,6 +429,22 @@ DeoptReason get_deopt_reason(CallSiteID id) {
     for (size_t i = 0; i < g_summary_count; ++i)
         if (g_summaries[i].id == id) return g_summaries[i].deopt_reason;
     return DeoptReason::None;
+}
+
+void set_oracle_mode(bool on) { g_oracle_mode = on; }
+bool oracle_mode()            { return g_oracle_mode; }
+
+OracleResult capturable() {
+    OracleResult r{0, 0};
+    for (size_t i = 0; i < g_summary_count; ++i) {
+        r.total_events += g_summaries[i].event_count;
+        // A perfect (never-blacklisting) picker captures every event of any
+        // site that reached a strategy decision. In oracle replay drift never
+        // deopts, so such sites stay Compiled through to exit.
+        if (g_summaries[i].phase == Phase::Compiled)
+            r.captured_events += g_summaries[i].event_count;
+    }
+    return r;
 }
 
 void reset_call_site(CallSiteID id, DeoptReason reason) {
