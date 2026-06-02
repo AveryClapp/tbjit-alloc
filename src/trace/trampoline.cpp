@@ -70,6 +70,27 @@ using free_fn = void (*)(void*);
 free_fn real_free = nullptr;
 void* (*g_real_realloc)(void*, size_t) = nullptr;
 
+// Bootstrap arena for the pre-constructor window. ld.so runs other libraries'
+// constructors during _dl_init, and symbol interposition is already live then,
+// so their malloc calls reach us BEFORE tbjit_init resolves g_real_malloc via
+// dlsym. Returning nullptr there crashed those constructors (observed:
+// find_so SIGSEGV in libselinux init, clang++ SIGABRT in libLLVM ManagedStatic
+// static-init -> operator new -> std::terminate). Serve those few early
+// allocations from a fixed static buffer instead; frees of them are no-ops
+// (leaked, but one-time and tiny) and must never reach libc free.
+alignas(16) unsigned char g_bootstrap[64 * 1024];
+std::atomic<size_t>       g_bootstrap_used{0};
+
+void* bootstrap_alloc(size_t size) {
+    size_t aligned = (size + 15) & ~static_cast<size_t>(15);
+    size_t off = g_bootstrap_used.fetch_add(aligned, std::memory_order_relaxed);
+    if (off + aligned > sizeof(g_bootstrap)) return nullptr;  // arena exhausted
+    return g_bootstrap + off;
+}
+inline bool is_bootstrap(const void* p) {
+    return p >= g_bootstrap && p < g_bootstrap + sizeof(g_bootstrap);
+}
+
 __attribute__((constructor))
 void tbjit_init() {
     g_real_malloc = reinterpret_cast<void* (*)(size_t)>(dlsym(RTLD_NEXT, "malloc"));
@@ -103,7 +124,7 @@ void tbjit_fini() {
 extern "C" {
 
 void* malloc(size_t size) {
-    if (!g_real_malloc) return nullptr;  // pre-init: dlsym not yet complete
+    if (!g_real_malloc) return bootstrap_alloc(size);  // pre-init: serve from bootstrap arena
     if (g_shutting_down.load(std::memory_order_acquire))
         return g_real_malloc(size);       // post-fini: bypass torn-down state
     if (reentrancy_guard) return g_real_malloc(size);
@@ -140,6 +161,7 @@ void* malloc(size_t size) {
 }
 
 void free(void* ptr) {
+    if (is_bootstrap(ptr)) return;  // pre-init bootstrap chunk: never reaches libc
     if (g_shutting_down.load(std::memory_order_acquire)) {
         // Post-fini: can't safely consult segment/dispatch state. If ptr
         // came from a tbjit-managed segment the underlying mmap'd region
@@ -150,7 +172,7 @@ void free(void* ptr) {
         real_free(ptr);
         return;
     }
-    if (reentrancy_guard || !real_free) { real_free(ptr); return; }
+    if (reentrancy_guard || !real_free) { if (real_free) real_free(ptr); return; }
     reentrancy_guard = true;
 
     void* ra = __builtin_return_address(0);
@@ -231,7 +253,21 @@ void free(void* ptr) {
 }
 
 void* realloc(void* ptr, size_t size) {
-    if (!g_real_realloc) return nullptr;  // pre-init: dlsym not yet complete
+    if (is_bootstrap(ptr)) {
+        // Bootstrap-arena chunk: can't grow in place and don't know its old
+        // size. Allocate fresh and copy bounded by the bytes remaining to the
+        // arena end (the whole arena is mapped, so this never faults).
+        void* out = malloc(size);
+        if (out) {
+            size_t avail = static_cast<size_t>(
+                (g_bootstrap + sizeof(g_bootstrap)) -
+                static_cast<const unsigned char*>(ptr));
+            std::memcpy(out, ptr, size < avail ? size : avail);
+        }
+        return out;
+    }
+    if (!g_real_realloc)                  // pre-init: serve from bootstrap arena
+        return ptr ? ptr : bootstrap_alloc(size);
     if (g_shutting_down.load(std::memory_order_acquire))
         return g_real_realloc(ptr, size);
     if (reentrancy_guard) return g_real_realloc(ptr, size);

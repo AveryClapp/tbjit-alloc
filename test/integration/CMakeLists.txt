@@ -110,4 +110,26 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(int_realloc_managed PROPERTIES
     PASS_REGULAR_EXPRESSION "OK"
   )
+
+  # Constructor-time allocation: a DT_NEEDED library (libctorprobe) whose
+  # constructor calls malloc during _dl_init. glibc initializes DT_NEEDED deps
+  # before the LD_PRELOAD'd tbjit, so the probe allocates before tbjit's
+  # constructor resolves the real allocator -- the ordering that crashed
+  # libselinux (find_so) and libLLVM (clang++). A pre-fix tbjit returns NULL and
+  # the probe _exit(33)s; the bootstrap-arena fix lets it print PROBE_CTOR_OK.
+  add_library(ctorprobe SHARED ctorprobe.c)
+  add_executable(int_ctor_alloc ctor_probe_main.c)
+  target_link_libraries(int_ctor_alloc PRIVATE ctorprobe)
+  # Keep the probe as a DT_NEEDED entry even though main calls none of its
+  # symbols, so its constructor actually runs.
+  target_link_options(int_ctor_alloc PRIVATE -Wl,--no-as-needed)
+  add_test(
+    NAME int_ctor_alloc
+    COMMAND ${CMAKE_COMMAND} -E env
+      LD_PRELOAD=$<TARGET_FILE:tbjit>
+      $<TARGET_FILE:int_ctor_alloc>
+  )
+  set_tests_properties(int_ctor_alloc PROPERTIES
+    PASS_REGULAR_EXPRESSION "PROBE_CTOR_OK"
+  )
 endif()
