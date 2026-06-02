@@ -1,0 +1,73 @@
+name: Sensitivity sweep
+
+# Phase 3a sensitivity track: run bench/realworkload/sweep.sh on the Linux
+# runner for one env-configurable picker knob and upload the per-value
+# sweep-summary.tsv. LD_PRELOAD is a no-op on macOS, so this is the only venue
+# the sweep can actually run. Dispatch one run per knob (they run in parallel).
+on:
+  workflow_dispatch:
+    inputs:
+      env_var:
+        description: 'Knob env var (e.g. TBJIT_WINDOW_SIZE)'
+        required: true
+        type: string
+      subdir:
+        description: 'Output subdir under bench-out/sweep (e.g. window)'
+        required: true
+        type: string
+      values:
+        description: 'Space-separated value list (e.g. "100 500 1000 2000 5000")'
+        required: true
+        type: string
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential \
+            libmimalloc-dev libjemalloc-dev
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run sweep
+        run: |
+          mkdir -p bench-out
+          bash bench/realworkload/sweep.sh \
+            "${{ inputs.env_var }}" "${{ inputs.subdir }}" ${{ inputs.values }} \
+            | tee bench-out/sweep-${{ inputs.subdir }}.log
+
+      - name: Render summary into job summary
+        if: always()
+        run: |
+          SUM="bench-out/sweep/${{ inputs.subdir }}/sweep-summary.tsv"
+          {
+            echo "## Sweep ${{ inputs.env_var }} (${{ inputs.subdir }})"
+            echo
+            if [ -s "$SUM" ]; then
+              echo '```'
+              column -t -s$'\t' < "$SUM"
+              echo '```'
+            else
+              echo "_no sweep-summary.tsv produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ inputs.subdir }}-${{ github.sha }}
+          path: bench-out/sweep/${{ inputs.subdir }}/
+          retention-days: 90
