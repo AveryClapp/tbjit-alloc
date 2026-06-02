@@ -69,6 +69,19 @@ jobs:
             echo "---" | tee -a bisect.log
           done
 
+      - name: Shadow validator — force bump (simplest), report violated invariant
+        if: always()
+        run: |
+          SHADOW="$PWD/build/libtbjit_shadow.so"
+          set +e
+          LD_PRELOAD="$SHADOW" TBJIT_FORCE_STRATEGY=bump \
+            node /tmp/work.js >/dev/null 2>shadow_bump.err
+          echo "shadow force=bump exit=$?" | tee -a bisect.log
+          echo "--- shadow stderr (tbjit shadow: ... lines) ---" | tee -a bisect.log
+          grep "tbjit shadow:" shadow_bump.err | head | tee -a bisect.log
+          echo "--- full tail ---" | tee -a bisect.log
+          tail -8 shadow_bump.err | tee -a bisect.log
+
       - name: Baseline — default (expected SIGSEGV) under gdb
         if: always()
         run: |
@@ -94,4 +107,5 @@ jobs:
             force_bump.err
             force_freelist.err
             force_arena.err
+            shadow_bump.err
           retention-days: 30
