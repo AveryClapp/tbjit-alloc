@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include "seg/segment.h"
 
 static inline unsigned shadow_tid() {
     return static_cast<unsigned>(syscall(SYS_gettid));
@@ -65,10 +66,11 @@ void validate_alloc(CallSiteID id, size_t size, void* jit_ptr) {
         if (g_table[i].ptr == jit_ptr) {
             Entry e = g_table[i];
             pthread_mutex_unlock(&g_mutex);
+            bool mgd = tbjit::seg::is_managed(tbjit::seg::of(jit_ptr));
             fprintf(stderr,
-                "tbjit shadow: DUP ptr=%p  existing{size=%zu id=%u tid=%u}  "
+                "tbjit shadow: DUP ptr=%p managed=%d  existing{size=%zu id=%u tid=%u}  "
                 "new{size=%zu id=%u tid=%u}  same_thread=%d same_site=%d\n",
-                jit_ptr, e.size, e.alloc_id, e.alloc_tid,
+                jit_ptr, mgd, e.size, e.alloc_id, e.alloc_tid,
                 size, id, tid,
                 (e.alloc_tid == tid), (e.alloc_id == id));
             std::abort();
