@@ -71,10 +71,12 @@ enum class Backend { Glibc, Bound, Sim };
 
 enum class OpKind { Alloc, Free };
 struct Op {
-    OpKind     kind;
-    CallSiteID id;    // alloc only
-    uint32_t   size;  // alloc only
-    uint32_t   slot;  // live[] index: alloc fills it, free reads it
+    OpKind                kind;
+    CallSiteID            id;    // alloc only
+    uint32_t              size;  // alloc only
+    uint32_t              slot;  // live[] index: alloc fills it, free reads it
+    dispatch::RoutineFn   fn;    // alloc only, bound backend: pre-resolved
+                                 // routine (nullptr => not compiled => libc)
 };
 
 bool read_trace(const char* path, std::vector<AllocEvent>& out) {
@@ -119,14 +121,14 @@ Resolved resolve(const std::vector<AllocEvent>& events) {
     for (const AllocEvent& ev : events) {
         if (ev.size != 0) {  // alloc
             uint32_t slot = r.n_allocs++;
-            r.ops.push_back({OpKind::Alloc, ev.call_site, ev.size, slot});
+            r.ops.push_back({OpKind::Alloc, ev.call_site, ev.size, slot, nullptr});
             freed.push_back(0);
             if (ev.ptr) live_index[ev.ptr] = slot;  // overwrite stale (reuse)
         } else {             // free
             ++r.total_frees;
             auto it = live_index.find(ev.ptr);
             if (it != live_index.end()) {
-                r.ops.push_back({OpKind::Free, 0, 0, it->second});
+                r.ops.push_back({OpKind::Free, 0, 0, it->second, nullptr});
                 freed[it->second] = 1;
                 live_index.erase(it);
                 ++r.matched_frees;
@@ -143,11 +145,6 @@ Resolved resolve(const std::vector<AllocEvent>& events) {
 // --- backend alloc/free -----------------------------------------------------
 
 inline void* glibc_alloc(CallSiteID, size_t size) { return malloc(size); }
-
-inline void* bound_alloc(CallSiteID id, size_t size) {
-    dispatch::RoutineFn fn = dispatch::lookup(id);
-    return fn ? fn(size) : g_real_malloc(size);
-}
 
 // Trampoline malloc preamble, minus the return-address hash (the harness holds
 // the id). Lower-bound per-call tax. Mirrors trampoline.cpp's malloc body.
@@ -193,9 +190,15 @@ inline void run_pass(Backend backend, const std::vector<Op>& ops,
             }
             break;
         case Backend::Bound:
+            // Pre-resolved direct call to the specialized routine — no per-call
+            // dispatch::lookup, so this isolates the pure allocator-level cost
+            // (the ceiling a static-linked deployment could reach). The dispatch
+            // tax is measured separately by the sim backend.
             for (const Op& op : ops) {
-                if (op.kind == OpKind::Alloc) live[op.slot] = bound_alloc(op.id, op.size);
-                else                          managed_aware_free(live[op.slot]);
+                if (op.kind == OpKind::Alloc)
+                    live[op.slot] = op.fn ? op.fn(op.size) : g_real_malloc(op.size);
+                else
+                    managed_aware_free(live[op.slot]);
             }
             break;
         case Backend::Sim:
@@ -338,6 +341,19 @@ int main(int argc, char** argv) {
         for (const AllocEvent& ev : events) tbjit::analysis::process_event(ev);
     }
 
+    // bound: pre-resolve each alloc's routine now that dispatch is populated, so
+    // the timed loop calls it directly (no per-call lookup). sim looks up live
+    // (it is modeling the dispatch path); glibc uses libc malloc.
+    if (backend == Backend::Bound) {
+        for (Op& op : r.ops)
+            if (op.kind == OpKind::Alloc) op.fn = tbjit::dispatch::lookup(op.id);
+    }
+
+    // The raw event buffer (often >2 GB) is no longer needed; free it before
+    // timing so it does not inflate the RSS baseline or crowd the allocator.
+    events.clear();
+    events.shrink_to_fit();
+
     std::vector<void*> live(r.n_allocs, nullptr);
 
 #if defined(__linux__) && defined(__x86_64__)
@@ -358,10 +374,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Space: the allocator's own high-water footprint for this stream, measured
+    // as the ru_maxrss growth across ONE full replay with no reclamation (so it
+    // reflects the real peak live set, not the reclaim-bounded steady state the
+    // timed passes below run in). One pass mirrors the original process, which
+    // survived this footprint live.
     long rss_before = peak_rss_kb();
+    run_pass(backend, r.ops, live);
+    long rss_footprint = peak_rss_kb() - rss_before;
+    if (rss_footprint < 0) rss_footprint = 0;
+    reclaim_leaked(backend, r.leaked, live);
 
-    // A few warmup passes populate freelists/segments (bound/sim) and grow the
-    // heap (glibc) so the timed passes measure steady state, not first-touch.
+    // Latency: warmup then timed passes, reclaiming leaked allocs between each so
+    // memory stays bounded (otherwise non-recycling strategies accumulate across
+    // passes and exhaust the segment table / RAM).
     const int warmup = 3;
     for (int p = 0; p < warmup; ++p) {
         run_pass(backend, r.ops, live);
@@ -378,10 +404,6 @@ int main(int argc, char** argv) {
         reclaim_leaked(backend, r.leaked, live);  // untimed
     }
 
-    long rss_after = peak_rss_kb();
-    long rss_delta = rss_after - rss_before;
-    if (rss_delta < 0) rss_delta = 0;
-
     std::sort(per_alloc_ns.begin(), per_alloc_ns.end());
     size_t n = per_alloc_ns.size();
     double p50 = (n % 2) ? per_alloc_ns[n / 2]
@@ -395,11 +417,11 @@ int main(int argc, char** argv) {
     double ci95 = 1.96 * std::sqrt(var) / std::sqrt(static_cast<double>(n));
 
     fprintf(stderr,
-        "bound_bench: p50=%.3f ns/alloc  ci95=%.3f  rss_delta=%ld kB "
-        "(%ld->%ld)  passes=%d\n",
-        p50, ci95, rss_delta, rss_before, rss_after, passes);
+        "bound_bench: p50=%.3f ns/alloc  ci95=%.3f  one-pass rss_footprint=%ld kB"
+        "  passes=%d\n",
+        p50, ci95, rss_footprint, passes);
 
     printf("%s\t%s\t%.3f\t%.3f\t%ld\t%.4f\n",
-           backend_name, label.c_str(), p50, ci95, rss_delta, matched_frac);
+           backend_name, label.c_str(), p50, ci95, rss_footprint, matched_frac);
     return 0;
 }
