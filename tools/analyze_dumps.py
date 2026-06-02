@@ -166,13 +166,34 @@ FAILURE_MODE_BY_STRATEGY = {
 }
 
 
-def failure_mode_aggregate(dumps):
-    """Group blacklisted sites by inferred failure mode.
+# Ground-truth reason codes the JIT now threads through the deopt path
+# (src/analysis: DeoptReason). Preferred over the strategy inference above;
+# the strategy map remains a fallback for dumps predating the reason field.
+FAILURE_MODE_BY_REASON = {
+    "SizeDrift":     ("Class drift",
+        "Multi-class miss rate too high: observed size distribution "
+        "drifted off the top-K modes picker locked in"),
+    "RegionExhaust": ("Hold misclass",
+        "Segment exhausted: site classified Reap but allocations live "
+        "long enough to fill the segment"),
+    "ThreadShift":   ("Thread migration",
+        "Owning thread changed: cross-thread alloc/free defeated the "
+        "thread-local fast path"),
+    "LifoViolation": ("LIFO violation",
+        "Stack discipline broken: alloc/free pair detection was a false "
+        "positive — site doesn't actually free in LIFO order"),
+}
 
-    Returns a Counter of (short_label, long_explanation) → count.
-    Sites whose strategy is missing from the taxonomy bucket into
-    ("Unknown", "no taxonomy entry") so the table doesn't silently
-    drop them as new strategies get added.
+
+def failure_mode_aggregate(dumps):
+    """Group blacklisted sites by failure mode.
+
+    Prefers the ground-truth `deopt_reason` recorded at the deopt site
+    (FAILURE_MODE_BY_REASON). Falls back to strategy inference
+    (FAILURE_MODE_BY_STRATEGY) for older dumps that lack the field or
+    recorded only a generic reason ("Other"/"None"). Returns a Counter of
+    (short_label, long_explanation) → count. Sites that match neither bucket
+    into ("Unknown", ...) so the table never silently drops them.
     """
     counts = Counter()
     unknown = ("Unknown", "no taxonomy entry for this strategy")
@@ -180,9 +201,12 @@ def failure_mode_aggregate(dumps):
         for site in d.get("sites", []):
             if not site.get("blacklisted"):
                 continue
-            strat = site.get("strategy", "-")
-            mode = FAILURE_MODE_BY_STRATEGY.get(strat, unknown)
-            counts[mode] += 1
+            reason = site.get("deopt_reason")
+            if reason in FAILURE_MODE_BY_REASON:
+                counts[FAILURE_MODE_BY_REASON[reason]] += 1
+            else:
+                strat = site.get("strategy", "-")
+                counts[FAILURE_MODE_BY_STRATEGY.get(strat, unknown)] += 1
     return counts
 
 

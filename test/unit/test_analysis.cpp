@@ -100,6 +100,42 @@ static void test_deopt_blacklist_limit_reads_env() {
     assert(tbjit::analysis::deopt_blacklist_limit() == 3u);
 }
 
+static void test_deopt_reason_size_drift() {
+    tbjit::analysis::reset_state();
+
+    // Compile a site at a stable size.
+    for (int i = 0; i < 11'000; ++i) {
+        tbjit::AllocEvent ev{9, 48, 0, 0, nullptr};
+        tbjit::analysis::process_event(ev);
+    }
+    assert(tbjit::analysis::get_phase(9) == tbjit::analysis::Phase::Compiled);
+
+    // Drift the size distribution: check_postspec's KS test detects the drift
+    // and must record the ground-truth reason (SizeDrift), not None.
+    for (int i = 0; i < 1'000; ++i) {
+        tbjit::AllocEvent ev{9, 512, 0, 0, nullptr};
+        tbjit::analysis::process_event(ev);
+    }
+    assert(tbjit::analysis::get_deopt_reason(9) ==
+           tbjit::analysis::DeoptReason::SizeDrift);
+}
+
+static void test_deopt_reason_recorded_by_reset() {
+    tbjit::analysis::reset_state();
+
+    for (int i = 0; i < 11'000; ++i) {
+        tbjit::AllocEvent ev{10, 64, 0, 0, nullptr};
+        tbjit::analysis::process_event(ev);
+    }
+    assert(tbjit::analysis::get_phase(10) == tbjit::analysis::Phase::Compiled);
+
+    // The runtime JIT deopt path passes a reason into reset_call_site; it must
+    // be retained on the summary so the dump records ground truth.
+    tbjit::analysis::reset_call_site(10, tbjit::analysis::DeoptReason::RegionExhaust);
+    assert(tbjit::analysis::get_deopt_reason(10) ==
+           tbjit::analysis::DeoptReason::RegionExhaust);
+}
+
 int main() {
     test_prespec_triggers_compiled();
     test_prespec_unstable_stays_prespec();
@@ -110,5 +146,7 @@ int main() {
     test_window_size_reads_env();
     test_ks_alpha_reads_env();
     test_deopt_blacklist_limit_reads_env();
+    test_deopt_reason_size_drift();
+    test_deopt_reason_recorded_by_reset();
     return 0;
 }

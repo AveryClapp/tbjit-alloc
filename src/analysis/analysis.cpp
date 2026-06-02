@@ -191,6 +191,9 @@ void advance_prespec(CallSiteSummary* s) {
 void check_postspec(CallSiteSummary* s) {
     if (!ks_stable(s->post_window.hist, s->baseline, g_ks_alpha)) {
         s->phase = Phase::Deopt;
+        // Ground truth: the KS test rejected the post-spec window against the
+        // baseline, i.e. the size distribution drifted off the locked-in modes.
+        s->deopt_reason = DeoptReason::SizeDrift;
         s->stable_windows = 0;
         s->windows[0].reset();
         s->windows[1].reset();
@@ -414,12 +417,24 @@ LifetimeTag get_lifetime_tag(CallSiteID id) {
     return LifetimeTag::Unknown;
 }
 
-void reset_call_site(CallSiteID id) {
+DeoptReason get_deopt_reason(CallSiteID id) {
+    for (size_t i = 0; i < g_summary_count; ++i)
+        if (g_summaries[i].id == id) return g_summaries[i].deopt_reason;
+    return DeoptReason::None;
+}
+
+void reset_call_site(CallSiteID id, DeoptReason reason) {
     for (size_t i = 0; i < g_summary_count; ++i) {
         if (g_summaries[i].id == id) {
             ++g_summaries[i].deopt_count;
             if (g_summaries[i].deopt_count >= g_deopt_blacklist_limit)
                 g_summaries[i].blacklisted = true;
+            // Record the ground-truth cause the JIT deopt path passed in. Keep
+            // any specific reason already set (e.g. SizeDrift from
+            // check_postspec) rather than overwriting it with a generic Other.
+            if (reason != DeoptReason::Other ||
+                g_summaries[i].deopt_reason == DeoptReason::None)
+                g_summaries[i].deopt_reason = reason;
             g_summaries[i].phase = Phase::Deopt;
             g_summaries[i].code_page = nullptr;
             g_summaries[i].stable_windows = 0;

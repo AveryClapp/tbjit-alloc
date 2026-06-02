@@ -1,4 +1,5 @@
 #include "emitter.h"
+#include "analysis/analysis.h"
 #include <cstring>
 
 namespace tbjit::codegen {
@@ -8,6 +9,14 @@ namespace {
 uint8_t* w8(uint8_t* p, uint8_t v)   { *p++ = v; return p; }
 uint8_t* w32(uint8_t* p, uint32_t v) { memcpy(p, &v, 4); return p + 4; }
 uint8_t* w64(uint8_t* p, uint64_t v) { memcpy(p, &v, 8); return p + 8; }
+
+// Emits `mov edx, <reason>` — the ground-truth deopt reason passed as the 3rd
+// arg (edx) to deopt::handle. Always on the cold deopt epilogue, so no hot-path
+// cost. edx is dead on every fast path, so clobbering it here is safe.
+uint8_t* w_reason(uint8_t* p, tbjit::analysis::DeoptReason r) {
+    p = w8(p, 0xBA);  // mov edx, imm32
+    return w32(p, static_cast<uint32_t>(r));
+}
 
 } // namespace
 
@@ -191,6 +200,12 @@ size_t emit_bump_alloc(uint8_t* buf, size_t buf_size,
     p = w8(p, 0xBE);
     p = w64(p, reinterpret_cast<uint64_t>(buf));
 
+    // mov edx, reason — BumpAlloc deopts on segment exhaust (size guard is the
+    // primary, exhaust the secondary cause; bump sites are size-monomorphic by
+    // selection so exhaust dominates blacklisting). Sustained size drift is
+    // still recorded precisely by check_postspec.
+    p = w_reason(p, tbjit::analysis::DeoptReason::RegionExhaust);
+
     // movabs rax, deopt_handler  (48 B8 <imm64>)
     p = w8(p, 0x48);
     p = w8(p, 0xB8);
@@ -336,6 +351,10 @@ size_t emit_freelist_alloc(uint8_t* buf, size_t buf_size,
     p = w8(p, 0x48); p = w8(p, 0xBE);
     p = w64(p, reinterpret_cast<uint64_t>(buf));
 
+    // mov edx, reason — TLFreeList's only deopt cause is the wrong-size guard;
+    // exhaust refills a new segment instead of deopting.
+    p = w_reason(p, tbjit::analysis::DeoptReason::SizeDrift);
+
     // movabs rax, deopt_handler (48 B8 <imm64>)
     p = w8(p, 0x48); p = w8(p, 0xB8);
     p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
@@ -474,6 +493,8 @@ size_t emit_epoch_arena(uint8_t* buf, size_t buf_size,
     p = w8(p, 0xBF); p = w32(p, call_site_id);
     p = w8(p, 0x48); p = w8(p, 0xBE);
     p = w64(p, reinterpret_cast<uint64_t>(buf));
+    // EpochArena deopts on the wrong-size guard only (exhaust resets the arena).
+    p = w_reason(p, tbjit::analysis::DeoptReason::SizeDrift);
     p = w8(p, 0x48); p = w8(p, 0xB8);
     p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
     p = w8(p, 0xFF); p = w8(p, 0xD0);
@@ -594,6 +615,8 @@ size_t emit_multi_freelist_alloc(uint8_t* buf, size_t buf_size,
     // movabs rsi, buf
     p = w8(p, 0x48); p = w8(p, 0xBE);
     p = w64(p, reinterpret_cast<uint64_t>(buf));
+    // MultiSizeFreeList deopts when a size misses all learned classes (drift).
+    p = w_reason(p, tbjit::analysis::DeoptReason::SizeDrift);
     // movabs rax, deopt_handler
     p = w8(p, 0x48); p = w8(p, 0xB8);
     p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
@@ -716,6 +739,9 @@ size_t emit_pc_alloc(uint8_t* buf, size_t buf_size,
     p = w8(p, 0xBF); p = w32(p, call_site_id);
     p = w8(p, 0x48); p = w8(p, 0xBE);
     p = w64(p, reinterpret_cast<uint64_t>(buf));
+    // ProducerConsumer: bump fast path + always-refill slow path, so the only
+    // deopt is the wrong-size guard.
+    p = w_reason(p, tbjit::analysis::DeoptReason::SizeDrift);
     p = w8(p, 0x48); p = w8(p, 0xB8);
     p = w64(p, reinterpret_cast<uint64_t>(deopt_handler));
     p = w8(p, 0xFF); p = w8(p, 0xD0);

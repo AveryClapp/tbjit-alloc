@@ -48,6 +48,18 @@ const char* phase_name(Phase p, bool blacklisted) {
     return "PreSpec";
 }
 
+const char* deopt_reason_name(DeoptReason r) {
+    switch (r) {
+        case DeoptReason::SizeDrift:     return "SizeDrift";
+        case DeoptReason::RegionExhaust: return "RegionExhaust";
+        case DeoptReason::ThreadShift:   return "ThreadShift";
+        case DeoptReason::LifoViolation: return "LifoViolation";
+        case DeoptReason::Other:         return "Other";
+        case DeoptReason::None:          return "None";
+    }
+    return "None";
+}
+
 void print_per_site_table(FILE* out) {
     fprintf(out, "\n%-18s %10s %6s %6s %6s  %10s  %-12s  %s\n",
             "CALL SITE", "EVENTS", "P50", "P95", "P99",
@@ -269,6 +281,7 @@ void write_json_dump(const char* path, const Summary& sum) {
                 "\"p50\": %u, \"p95\": %u, \"p99\": %u, "
                 "\"phase\": \"%s\", \"strategy\": \"%s\", "
                 "\"lifetime\": \"%s\", \"deopts\": %u, "
+                "\"deopt_reason\": \"%s\", "
                 "\"blacklisted\": %s, \"first_compile_events\": %lu}%s\n",
                 static_cast<unsigned long>(s.id),
                 static_cast<unsigned long>(s.event_count),
@@ -278,6 +291,7 @@ void write_json_dump(const char* path, const Summary& sum) {
                 strategy_name(s.candidate),
                 lifetime_name(s.lifetime),
                 s.deopt_count,
+                deopt_reason_name(s.deopt_reason),
                 s.blacklisted ? "true" : "false",
                 static_cast<unsigned long>(s.first_compile_events),
                 (i + 1 == g_summary_count) ? "" : ",");

@@ -29,8 +29,9 @@ PendingReclaim   g_pending[MAX_PENDING];     // background-thread-only
 size_t           g_pending_count = 0;        // background-thread-only
 
 struct DequeuedDeopt {
-    CallSiteID id;
-    void*      page;
+    CallSiteID            id;
+    void*                 page;
+    analysis::DeoptReason reason;
 };
 
 constexpr size_t DEOPT_QUEUE_CAP = 256;
@@ -63,11 +64,11 @@ void register_thread() {
 
 void init() {}
 
-void handle(CallSiteID id, void* code_page) {
+void handle(CallSiteID id, void* code_page, analysis::DeoptReason reason) {
     dispatch::revert(id);
     pthread_mutex_lock(&g_deopt_mutex);
     if (g_deopt_tail - g_deopt_head < DEOPT_QUEUE_CAP) {
-        g_deopt_queue[g_deopt_tail % DEOPT_QUEUE_CAP] = {id, code_page};
+        g_deopt_queue[g_deopt_tail % DEOPT_QUEUE_CAP] = {id, code_page, reason};
         ++g_deopt_tail;
     }
     pthread_mutex_unlock(&g_deopt_mutex);
@@ -91,7 +92,7 @@ void drain_pending() {
         ++g_deopt_head;
         pthread_mutex_unlock(&g_deopt_mutex);
 
-        analysis::reset_call_site(d.id);
+        analysis::reset_call_site(d.id, d.reason);
         uint64_t e = g_epoch.fetch_add(1, std::memory_order_acq_rel);
         if (g_pending_count < MAX_PENDING)
             g_pending[g_pending_count++] = {d.page, e};

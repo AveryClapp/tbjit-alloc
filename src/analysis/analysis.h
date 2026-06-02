@@ -14,6 +14,18 @@ enum class Phase : uint8_t { PreSpec, Compiled, Deopt };
 //   Unknown — too few events; default to Hold (conservative).
 enum class LifetimeTag : uint8_t { Unknown, Reap, Hold };
 
+// Ground-truth reason a compiled site deoptimized / was blacklisted, recorded
+// where the deopt actually happens (vs. analyze_dumps.py's strategy-inferred
+// guess). Emitted per-site in the JSON dump.
+//   SizeDrift     — observed size distribution drifted off the locked-in modes
+//   RegionExhaust — segment/arena filled before chunks were reclaimed
+//   ThreadShift   — owning thread changed (cross-thread alloc/free)
+//   LifoViolation — PairedStack discipline broken (frees not LIFO)
+//   Other         — deopt happened but no specific reason was threaded in
+enum class DeoptReason : uint8_t {
+    None, SizeDrift, RegionExhaust, ThreadShift, LifoViolation, Other
+};
+
 // Runtime-configurable picker knobs (env-overridable; see analysis.cpp). Declared
 // here so SizeWindow::full() can read window_size() from its inline body.
 uint32_t window_size();            // TBJIT_WINDOW_SIZE, default 1000
@@ -72,6 +84,7 @@ struct CallSiteSummary {
     uint32_t    stable_windows{0};
     uint32_t    deopt_count{0};      // total deopts seen; blacklist threshold
     bool        blacklisted{false};  // true → never recompile this site
+    DeoptReason deopt_reason{DeoptReason::None};  // ground-truth deopt cause
     LifetimeTag lifetime{LifetimeTag::Unknown};
     uint64_t    first_compile_events{0};  // event_count when this site first
                                           // reached Compiled. 0 = never
@@ -106,7 +119,8 @@ void     process_event(const AllocEvent& ev);
 Phase    get_phase(CallSiteID id);
 Strategy get_candidate_strategy(CallSiteID id);
 LifetimeTag get_lifetime_tag(CallSiteID id);
-void     reset_call_site(CallSiteID id);
+DeoptReason get_deopt_reason(CallSiteID id);
+void     reset_call_site(CallSiteID id, DeoptReason reason = DeoptReason::Other);
 void     run();  // background thread entry point (Task 6)
 void     start_background_thread();
 void     stop_background_thread();
