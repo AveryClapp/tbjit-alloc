@@ -130,6 +130,57 @@ jobs:
           cat tlsprobe.build.log | tee -a tls_probe.log
           /tmp/tlsprobe 2>&1 | tee -a tls_probe.log
 
+      - name: Minimal multithreaded repro under shadow (force fast compile)
+        if: always()
+        run: |
+          SHADOW="$PWD/build/libtbjit_shadow.so"
+          PRE="$PWD/build/libtbjit.so"
+          # Single hot call site, monomorphic 64-byte allocs across N threads.
+          # Compiles fast (low STABLE_WINDOWS). Two phases:
+          #  (A) each thread allocs+frees its own chunks (same-thread recycle)
+          #  (B) producer/consumer: threads free chunks allocated by others
+          #      (cross-thread free -> mpsc path).
+          cat > /tmp/mt.cpp <<'CPP'
+          #include <pthread.h>
+          #include <cstdlib>
+          #include <cstring>
+          #include <cstdio>
+          #include <atomic>
+          static const int NT = 4;
+          static const long ITERS = 2000000;
+          static void* self_recycle(void*) {
+            for (long i = 0; i < ITERS; i++) {
+              void* p = malloc(64);
+              if (!p) { fprintf(stderr,"null\n"); abort(); }
+              memset(p, 0xAB, 64);
+              free(p);
+            }
+            return nullptr;
+          }
+          int main() {
+            pthread_t t[NT];
+            for (int i=0;i<NT;i++) pthread_create(&t[i],nullptr,self_recycle,nullptr);
+            for (int i=0;i<NT;i++) pthread_join(t[i],nullptr);
+            printf("OK\n");
+            return 0;
+          }
+          CPP
+          g++ -std=c++17 -O2 /tmp/mt.cpp -o /tmp/mt -lpthread
+          set +e
+          echo "=== mt under shadow (force freelist, STABLE_WINDOWS=2) ===" | tee -a bisect.log
+          LD_PRELOAD="$SHADOW" TBJIT_FORCE_STRATEGY=freelist TBJIT_STABLE_WINDOWS=2 \
+            /tmp/mt >/dev/null 2>mt_shadow.err
+          echo "mt shadow freelist exit=$?" | tee -a bisect.log
+          grep "tbjit shadow:" mt_shadow.err | head | tee -a bisect.log
+          tail -4 mt_shadow.err | tee -a bisect.log
+          echo "---" | tee -a bisect.log
+          echo "=== mt under production (force freelist) ===" | tee -a bisect.log
+          LD_PRELOAD="$PRE" TBJIT_FORCE_STRATEGY=freelist TBJIT_STABLE_WINDOWS=2 \
+            /tmp/mt >/dev/null 2>mt_prod.err
+          echo "mt prod freelist exit=$?" | tee -a bisect.log
+          tail -4 mt_prod.err | tee -a bisect.log
+          echo "===" | tee -a bisect.log
+
       - name: Bisection — single-threaded V8 (no concurrent marking)
         if: always()
         run: |
@@ -176,4 +227,6 @@ jobs:
             shadow_bump.err
             shadow_default.err
             tls_probe.log
+            mt_shadow.err
+            mt_prod.err
           retention-days: 30
