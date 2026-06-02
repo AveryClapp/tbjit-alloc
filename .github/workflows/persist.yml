@@ -1,0 +1,65 @@
+name: Picker persistence
+
+# Phase 3a.5: run the real-workload suite N times and measure how reproducibly
+# the picker's decisions land — site-ID overlap, identical strategy per site,
+# blacklist-set stability. LD_PRELOAD is a no-op on macOS, so CI is the only
+# venue. ASLR is disabled (setarch -R) so return-address-hashed site IDs are
+# stable across runs; otherwise the IDs shift and overlap collapses to zero.
+on:
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: 'Number of suite runs to compare'
+        required: false
+        default: '5'
+        type: string
+
+jobs:
+  persist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential \
+            libmimalloc-dev libjemalloc-dev \
+            lua5.4 jq xz-utils
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run suite N times (ASLR off for stable site IDs)
+        run: |
+          mkdir -p bench-out/persist
+          for i in $(seq 1 ${{ inputs.reps }}); do
+            echo "=== persistence run $i ==="
+            setarch "$(uname -m)" -R \
+              bash bench/realworkload/run_suite.sh "bench-out/persist/run$i"
+          done
+
+      - name: Analyze persistence
+        if: always()
+        run: |
+          python3 tools/persistence.py bench-out/persist \
+            | tee bench-out/persist/persistence.md
+          {
+            echo "## Picker persistence (${{ inputs.reps }} runs)"
+            echo
+            cat bench-out/persist/persistence.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: persist-${{ github.sha }}
+          path: bench-out/persist/
+          retention-days: 90
