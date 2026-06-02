@@ -52,9 +52,11 @@
 #include <sys/resource.h>
 
 // --- trampoline-shim globals (trampoline.cpp excluded from this tool) -------
-// codegen embeds g_real_malloc as the JIT routines' fallback; dump references
-// the alloc counters. Set g_real_malloc to libc malloc in main().
-void* (*g_real_malloc)(size_t) = nullptr;
+// codegen embeds g_real_malloc as the JIT routines' fallback and the bound/sim
+// backends call it for non-compiled sites; dump references the alloc counters.
+// Initialized to libc malloc here (no trampoline links into this tool, so
+// malloc IS libc) so it is valid before the learning pass compiles anything.
+void* (*g_real_malloc)(size_t) = std::malloc;
 std::atomic<uint64_t> g_jit_allocs{0};
 std::atomic<uint64_t> g_generic_allocs{0};
 
@@ -99,26 +101,30 @@ bool read_trace(const char* path, std::vector<AllocEvent>& out) {
 // orig->slot map mirrors process_event's convention: size==0 is a free (so are
 // malloc(0) records, which the analyzer also treats as frees).
 struct Resolved {
-    std::vector<Op> ops;
-    uint32_t        n_allocs       = 0;
-    uint64_t        total_frees    = 0;
-    uint64_t        matched_frees  = 0;
+    std::vector<Op>       ops;
+    std::vector<uint32_t> leaked;  // slots allocated but never freed in-trace
+    uint32_t              n_allocs       = 0;
+    uint64_t              total_frees    = 0;
+    uint64_t              matched_frees  = 0;
 };
 
 Resolved resolve(const std::vector<AllocEvent>& events) {
     Resolved r;
+    std::vector<char> freed;  // freed[slot] == 1 once a Free op references it
     std::unordered_map<const void*, uint32_t> live_index;
     live_index.reserve(events.size());
     for (const AllocEvent& ev : events) {
         if (ev.size != 0) {  // alloc
             uint32_t slot = r.n_allocs++;
             r.ops.push_back({OpKind::Alloc, ev.call_site, ev.size, slot});
+            freed.push_back(0);
             if (ev.ptr) live_index[ev.ptr] = slot;  // overwrite stale (reuse)
         } else {             // free
             ++r.total_frees;
             auto it = live_index.find(ev.ptr);
             if (it != live_index.end()) {
                 r.ops.push_back({OpKind::Free, 0, 0, it->second});
+                freed[it->second] = 1;
                 live_index.erase(it);
                 ++r.matched_frees;
             }
@@ -126,6 +132,8 @@ Resolved resolve(const std::vector<AllocEvent>& events) {
             // skip — never fabricate. Counted via total_frees - matched_frees.
         }
     }
+    for (uint32_t s = 0; s < r.n_allocs; ++s)
+        if (!freed[s]) r.leaked.push_back(s);
     return r;
 }
 
@@ -193,6 +201,19 @@ inline void run_pass(Backend backend, const std::vector<Op>& ops,
                 else                          managed_aware_free(live[op.slot]);
             }
             break;
+    }
+}
+
+// Free the allocations that the trace never frees (leaked slots). Run untimed
+// between passes so each timed pass measures a recycled steady state instead of
+// accumulating ~one-pass-of-leak per iteration (perl leaks millions/pass).
+inline void reclaim_leaked(Backend backend, const std::vector<uint32_t>& leaked,
+                           std::vector<void*>& live) {
+    for (uint32_t s : leaked) {
+        if (!live[s]) continue;
+        if (backend == Backend::Glibc) free(live[s]);
+        else                           managed_aware_free(live[s]);
+        live[s] = nullptr;
     }
 }
 
@@ -319,7 +340,10 @@ int main(int argc, char** argv) {
     // A few warmup passes populate freelists/segments (bound/sim) and grow the
     // heap (glibc) so the timed passes measure steady state, not first-touch.
     const int warmup = 3;
-    for (int p = 0; p < warmup; ++p) run_pass(backend, r.ops, live);
+    for (int p = 0; p < warmup; ++p) {
+        run_pass(backend, r.ops, live);
+        reclaim_leaked(backend, r.leaked, live);
+    }
 
     std::vector<double> per_alloc_ns;
     per_alloc_ns.reserve(passes);
@@ -328,6 +352,7 @@ int main(int argc, char** argv) {
         run_pass(backend, r.ops, live);
         double t1 = now_ns();
         per_alloc_ns.push_back((t1 - t0) / static_cast<double>(r.n_allocs));
+        reclaim_leaked(backend, r.leaked, live);  // untimed
     }
 
     long rss_after = peak_rss_kb();
