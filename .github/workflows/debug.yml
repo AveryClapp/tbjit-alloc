@@ -56,6 +56,19 @@ jobs:
           echo "--- stderr tail ---" | tee -a bisect.log
           tail -5 nocompile.err | tee -a bisect.log
 
+      - name: Bisection — force each strategy uniformly
+        if: always()
+        run: |
+          PRE="$PWD/build/libtbjit.so"
+          set +e
+          for strat in bump freelist arena; do
+            LD_PRELOAD="$PRE" TBJIT_DUMP=1 TBJIT_FORCE_STRATEGY=$strat \
+              node /tmp/work.js >/dev/null 2>"force_$strat.err"
+            echo "force=$strat exit=$?" | tee -a bisect.log
+            grep -i "pthread_create\|Segmentation\|via JIT" "force_$strat.err" | tee -a bisect.log
+            echo "---" | tee -a bisect.log
+          done
+
       - name: Baseline — default (expected SIGSEGV) under gdb
         if: always()
         run: |
@@ -78,4 +91,7 @@ jobs:
             node_bt.log
             bisect.log
             nocompile.err
+            force_bump.err
+            force_freelist.err
+            force_arena.err
           retention-days: 30
