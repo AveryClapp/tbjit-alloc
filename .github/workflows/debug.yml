@@ -146,21 +146,62 @@ jobs:
           #include <cstring>
           #include <cstdio>
           #include <atomic>
+          #include <vector>
           static const int NT = 4;
-          static const long ITERS = 2000000;
-          static void* self_recycle(void*) {
+          static const long ITERS = 400000;
+          // realloc-growth: alloc small, grow via realloc several times, verify the
+          // copied prefix survives migration, then free. Mirrors V8/STL vector growth
+          // that exercises the tbjit realloc copy-migrate path on managed chunks.
+          static void* realloc_grow(void*) {
             for (long i = 0; i < ITERS; i++) {
-              void* p = malloc(64);
-              if (!p) { fprintf(stderr,"null\n"); abort(); }
-              memset(p, 0xAB, 64);
+              size_t n = 16;
+              unsigned char* p = (unsigned char*)malloc(n);
+              if (!p) abort();
+              memset(p, 0x5A, n);
+              for (int g = 0; g < 4; g++) {
+                size_t n2 = n * 2;
+                unsigned char* q = (unsigned char*)realloc(p, n2);
+                if (!q) abort();
+                // The first n bytes must still be 0x5A after migration.
+                for (size_t k = 0; k < n; k++)
+                  if (q[k] != 0x5A) { fprintf(stderr,"CORRUPT prefix i=%ld g=%d k=%zu got=%02x\n", i,g,k,q[k]); abort(); }
+                memset(q + n, 0x5A, n2 - n);  // fill the grown tail
+                p = q; n = n2;
+              }
               free(p);
             }
             return nullptr;
           }
+          // cross-thread free: each producer fills a disjoint slice of a shared
+          // pointer array; after they join, a different thread frees everything
+          // (free on a thread other than the allocator -> tbjit mpsc path).
+          static const long PER = 300000;
+          static void** slab[3];
+          static int pidx[3] = {0,1,2};
+          static void* producer(void* a) {
+            int id = *(int*)a;
+            for (long i=0;i<PER;i++){
+              void* p = malloc(48); if(!p) abort(); memset(p,0xC3,48);
+              slab[id][i] = p;
+            }
+            return nullptr;
+          }
+          static void* freer(void*) {
+            for (int id=0; id<3; id++)
+              for (long i=0;i<PER;i++) free(slab[id][i]);
+            return nullptr;
+          }
           int main() {
             pthread_t t[NT];
-            for (int i=0;i<NT;i++) pthread_create(&t[i],nullptr,self_recycle,nullptr);
+            for (int i=0;i<NT;i++) pthread_create(&t[i],nullptr,realloc_grow,nullptr);
             for (int i=0;i<NT;i++) pthread_join(t[i],nullptr);
+            // cross-thread phase
+            for(int i=0;i<3;i++) slab[i]=(void**)malloc(sizeof(void*)*PER);
+            pthread_t pr[3];
+            for(int i=0;i<3;i++) pthread_create(&pr[i],nullptr,producer,&pidx[i]);
+            for(int i=0;i<3;i++) pthread_join(pr[i],nullptr);
+            pthread_t fr; pthread_create(&fr,nullptr,freer,nullptr);
+            pthread_join(fr,nullptr);
             printf("OK\n");
             return 0;
           }
