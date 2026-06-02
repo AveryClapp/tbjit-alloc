@@ -82,6 +82,52 @@ jobs:
           echo "--- full tail ---" | tee -a bisect.log
           tail -8 shadow_bump.err | tee -a bisect.log
 
+      - name: TLS-offset invariance probe (root-cause confirmation)
+        if: always()
+        run: |
+          # Read the REAL tl_bumps thread_local from libtbjit on the main thread
+          # and on a pthread-created worker, and print the offset the JIT bakes:
+          #   off = &tl_bumps[idx].ptr - __builtin_thread_pointer()
+          # If the two threads disagree, the baked fs:[off] is only valid on the
+          # compiling thread -> cross-thread aliasing. That is the hypothesis.
+          cat > /tmp/tlsprobe.cpp <<'CPP'
+          #include <cstdint>
+          #include <cstdio>
+          #include <pthread.h>
+          namespace tbjit { struct CallSiteID; namespace seg { struct SegmentHeader; } }
+          // Mirror the real layout from src/codegen/tls.h exactly.
+          namespace tbjit::codegen {
+            struct BumpSlot { unsigned char* ptr; unsigned char* end; };
+            constexpr unsigned MAX_COMPILED_SITES = 4096;
+            extern thread_local BumpSlot tl_bumps[MAX_COMPILED_SITES];
+          }
+          using tbjit::codegen::tl_bumps;
+          static long off(unsigned idx) {
+            return (long)((intptr_t)&tl_bumps[idx].ptr
+                          - (intptr_t)__builtin_thread_pointer());
+          }
+          static void* worker(void*) {
+            printf("worker  idx0 off=%ld  idx7 off=%ld  &tl=%p tp=%p\n",
+                   off(0), off(7), (void*)&tl_bumps[0], (void*)__builtin_thread_pointer());
+            return nullptr;
+          }
+          int main() {
+            printf("main    idx0 off=%ld  idx7 off=%ld  &tl=%p tp=%p\n",
+                   off(0), off(7), (void*)&tl_bumps[0], (void*)__builtin_thread_pointer());
+            pthread_t t; pthread_create(&t, nullptr, worker, nullptr);
+            pthread_join(t, nullptr);
+            return 0;
+          }
+          CPP
+          set +e
+          # Link against libtbjit so we bind to the SAME thread_local definitions
+          # the JIT routine's baked offset was derived from.
+          g++ -std=c++17 -O0 -g /tmp/tlsprobe.cpp -o /tmp/tlsprobe \
+            -L"$PWD/build" -ltbjit -Wl,-rpath,"$PWD/build" -lpthread 2>tlsprobe.build.log
+          echo "build rc=$?" | tee -a tls_probe.log
+          cat tlsprobe.build.log | tee -a tls_probe.log
+          /tmp/tlsprobe 2>&1 | tee -a tls_probe.log
+
       - name: Baseline — default (expected SIGSEGV) under gdb
         if: always()
         run: |
@@ -108,4 +154,5 @@ jobs:
             force_freelist.err
             force_arena.err
             shadow_bump.err
+            tls_probe.log
           retention-days: 30
