@@ -1,0 +1,68 @@
+name: Crash backtrace
+
+# Dispatch-only diagnostic: reproduce the node_bench (SIGSEGV after
+# "pthread_create: Invalid argument") crash under gdb on Linux and capture a
+# backtrace. LD_PRELOAD is a no-op on macOS, so CI is the only repro venue.
+# gdb itself is launched WITHOUT LD_PRELOAD; only the inferior gets libtbjit
+# via `set exec-wrapper env`, so the debugger is not itself interposed.
+on:
+  workflow_dispatch:
+
+jobs:
+  backtrace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential gdb nodejs
+
+      - name: Configure (RelWithDebInfo, matches production crash + symbols)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Versions
+        run: |
+          node --version
+          gdb --version | head -1
+
+      - name: node_bench under gdb (SIGSEGV)
+        if: always()
+        run: |
+          PRE="$PWD/build/libtbjit.so"
+          cat > /tmp/work.js <<'JS'
+          let sink = 0;
+          for (let round = 0; round < 300; round++) {
+            const a = [];
+            for (let i = 0; i < 50000; i++) {
+              a.push({ k: "key_" + (i % 1024), v: i, tags: [i, i + 1, i + 2] });
+            }
+            for (const o of a) sink += o.v + o.tags.length;
+          }
+          process.stdout.write(String(sink) + "\n");
+          JS
+          gdb -batch \
+            -ex "set exec-wrapper env LD_PRELOAD=$PRE TBJIT_DUMP=1" \
+            -ex run \
+            -ex "echo \n==== BACKTRACE (node) ====\n" \
+            -ex "bt" \
+            -ex "echo \n==== ALL THREADS ====\n" \
+            -ex "thread apply all bt" \
+            -ex "echo \n==== FAULTING FRAME INFO ====\n" \
+            -ex "info registers rip" \
+            -ex "info symbol \$rip" \
+            --args node /tmp/work.js 2>&1 | tee node_bt.log | tail -200
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-backtraces-${{ github.sha }}
+          path: |
+            node_bt.log
+          retention-days: 30
