@@ -65,8 +65,10 @@ for name in "${CORPUS[@]}"; do
   echo "[bench $name] trace=$trace ($(du -h "$trace" | cut -f1))"
 
   for backend in "${BACKENDS[@]}"; do
+    # --profile appends a PROFILE line (alloc vs free cyc/op, segment count,
+    # jit-served fraction) to the per-backend log for root-cause analysis.
     if ! "$BENCH" "$trace" --backend "$backend" --label "$name" --passes "$PASSES" \
-         >> "$TSV" 2> "$OUT_DIR/${name}.${backend}.log"; then
+         --profile >> "$TSV" 2> "$OUT_DIR/${name}.${backend}.log"; then
       echo "[bench $name/$backend] failed (see ${name}.${backend}.log)" >&2
     fi
   done

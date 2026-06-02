@@ -223,6 +223,57 @@ inline void reclaim_leaked(Backend backend, const std::vector<uint32_t>& leaked,
     }
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+// Serializing-ish timestamp for per-op profiling. The rdtscp overhead is a
+// near-constant added to every bracket, so it cancels when comparing alloc vs
+// free within a backend and across backends. Localization, not absolute timing.
+inline uint64_t rdtscp_now() {
+    uint32_t lo, hi, aux;
+    __asm__ __volatile__("rdtscp" : "=a"(lo), "=d"(hi), "=c"(aux) :: "memory");
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+// Phase-1 evidence: split one pass into alloc-cycles vs free-cycles so we can
+// see WHERE the bound overhead lives (alloc routine vs free path / is_managed),
+// plus the exact segment count (is_managed scan length) and the fraction of
+// allocs actually served by a JIT routine vs falling back to libc.
+void profile_pass(Backend backend, const std::vector<Op>& ops,
+                  std::vector<void*>& live, const char* backend_name,
+                  const char* label) {
+    uint64_t a_cyc = 0, f_cyc = 0, a_n = 0, f_n = 0, jit_n = 0;
+    for (const Op& op : ops) {
+        if (op.kind == OpKind::Alloc) {
+            uint64_t t0 = rdtscp_now();
+            void* p;
+            switch (backend) {
+                case Backend::Glibc: p = glibc_alloc(op.id, op.size); break;
+                case Backend::Bound: p = op.fn ? op.fn(op.size)
+                                               : g_real_malloc(op.size); break;
+                default:             p = sim_alloc(op.id, op.size); break;
+            }
+            uint64_t t1 = rdtscp_now();
+            live[op.slot] = p;
+            a_cyc += t1 - t0; ++a_n; if (op.fn) ++jit_n;
+        } else {
+            void* p = live[op.slot];
+            uint64_t t0 = rdtscp_now();
+            if (backend == Backend::Glibc) free(p);
+            else                           managed_aware_free(p);
+            uint64_t t1 = rdtscp_now();
+            f_cyc += t1 - t0; ++f_n;
+        }
+    }
+    fprintf(stderr,
+        "PROFILE %s %s alloc=%.1f cyc/op free=%.1f cyc/op segments=%zu "
+        "jit_served=%.3f\n",
+        backend_name, label,
+        a_n ? static_cast<double>(a_cyc) / static_cast<double>(a_n) : 0.0,
+        f_n ? static_cast<double>(f_cyc) / static_cast<double>(f_n) : 0.0,
+        tbjit::seg::segment_count(),
+        a_n ? static_cast<double>(jit_n) / static_cast<double>(a_n) : 0.0);
+}
+#endif
+
 long peak_rss_kb() {
     struct rusage ru{};
     getrusage(RUSAGE_SELF, &ru);
@@ -300,6 +351,7 @@ int main(int argc, char** argv) {
     int passes = 12;
     std::string label;
     bool tsv_header = false;
+    bool profile = false;
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--backend") && i + 1 < argc) {
@@ -315,6 +367,8 @@ int main(int argc, char** argv) {
             label = argv[++i];
         } else if (!strcmp(argv[i], "--tsv-header")) {
             tsv_header = true;
+        } else if (!strcmp(argv[i], "--profile")) {
+            profile = true;
         } else if (!trace_path) {
             trace_path = argv[i];
         } else {
@@ -433,6 +487,15 @@ int main(int argc, char** argv) {
         reclaim_leaked(backend, r.leaked, live);          // untimed
         if (backend == Backend::Bound) resolve_fns(r.ops); // untimed
     }
+
+#if defined(__linux__) && defined(__x86_64__)
+    if (profile) {
+        profile_pass(backend, r.ops, live, backend_name, label.c_str());
+        reclaim_leaked(backend, r.leaked, live);
+    }
+#else
+    (void)profile;
+#endif
 
     std::sort(per_alloc_ns.begin(), per_alloc_ns.end());
     size_t n = per_alloc_ns.size();

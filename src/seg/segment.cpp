@@ -167,4 +167,6 @@ bool is_managed(const SegmentHeader* seg) {
     return false;
 }
 
+size_t segment_count() { return g_index_count.load(std::memory_order_acquire); }
+
 } // namespace tbjit::seg

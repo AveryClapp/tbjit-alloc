@@ -55,6 +55,7 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
 void           free_segment(SegmentHeader* seg);
 
 bool is_managed(const SegmentHeader* seg);
+size_t segment_count();  // registered segments (is_managed scans this many)
 void register_segment(SegmentHeader* seg);
 void unregister_segment(SegmentHeader* seg);
 
