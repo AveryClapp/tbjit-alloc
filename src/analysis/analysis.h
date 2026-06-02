@@ -94,6 +94,7 @@ struct CallSiteSummary {
 };
 
 void     init();
+uint32_t stable_windows_threshold();  // convergence bar, TBJIT_STABLE_WINDOWS
 void     init_state();
 void     reset_state();
 void     process_event(const AllocEvent& ev);

@@ -1,6 +1,8 @@
 #include "analysis/analysis.h"
 #include "alloc/alloc.h"
-#include <cassert>
+#undef NDEBUG  // build is RelWithDebInfo (-DNDEBUG); force assert() active so
+#include <cassert>  // these tests actually check rather than no-op.
+#include <cstdlib>
 
 static void test_prespec_triggers_compiled() {
     tbjit::alloc::init();
@@ -58,10 +60,25 @@ static void test_candidate_strategy_monomorphic() {
     assert(tbjit::analysis::get_candidate_strategy(4) == tbjit::Strategy::BumpAlloc);
 }
 
+static void test_stable_windows_threshold_reads_env() {
+    setenv("TBJIT_STABLE_WINDOWS", "3", 1);
+    tbjit::analysis::init();
+    assert(tbjit::analysis::stable_windows_threshold() == 3u);
+    unsetenv("TBJIT_STABLE_WINDOWS");
+}
+
+static void test_stable_windows_threshold_default() {
+    unsetenv("TBJIT_STABLE_WINDOWS");
+    tbjit::analysis::init();
+    assert(tbjit::analysis::stable_windows_threshold() == 10u);
+}
+
 int main() {
     test_prespec_triggers_compiled();
     test_prespec_unstable_stays_prespec();
     test_compiled_drift_causes_deopt();
     test_candidate_strategy_monomorphic();
+    test_stable_windows_threshold_reads_env();
+    test_stable_windows_threshold_default();
     return 0;
 }

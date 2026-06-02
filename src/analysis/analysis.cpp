@@ -24,7 +24,8 @@ size_t           g_summary_count = 0;
 namespace {
 
 constexpr size_t   MAX_CALL_SITES        = 4096;
-constexpr uint32_t STABLE_WINDOWS_NEEDED = 10;
+constexpr uint32_t STABLE_WINDOWS_DEFAULT = 10;
+uint32_t           g_stable_windows       = STABLE_WINDOWS_DEFAULT;
 constexpr double   KS_ALPHA              = 0.05;
 constexpr uint32_t DEOPT_BLACKLIST_LIMIT = 3;     // after this many deopts, stop recompiling
 constexpr double   LIFETIME_REAP_RATIO   = 0.50;  // free_count/event_count >= → Reap
@@ -71,7 +72,7 @@ void advance_prespec(CallSiteSummary* s) {
                              s->windows[prev].hist, KS_ALPHA);
     if (stable) {
         ++s->stable_windows;
-        if (s->stable_windows >= STABLE_WINDOWS_NEEDED) {
+        if (s->stable_windows >= g_stable_windows) {
             // Blacklisted sites stay in PreSpec forever — analysis still
             // runs but compile() is skipped. Avoids pathological recompile
             // loops on call sites that keep deopting (truly polymorphic,
@@ -248,8 +249,17 @@ void* background_loop(void*) {
 
 } // namespace
 
+uint32_t stable_windows_threshold() { return g_stable_windows; }
+
 void init() {
     alloc::init();
+    // Convergence bar is env-overridable for the sensitivity sweep; reset to
+    // the default each init() so the override does not persist across re-inits.
+    g_stable_windows = STABLE_WINDOWS_DEFAULT;
+    if (const char* v = std::getenv("TBJIT_STABLE_WINDOWS")) {
+        uint32_t n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+        if (n > 0) g_stable_windows = n;
+    }
     init_state();
 }
 
