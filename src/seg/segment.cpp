@@ -1,6 +1,8 @@
 #include "segment.h"
 #include <atomic>
 #include <cassert>
+#include <cstdlib>
+#include <cstring>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -26,10 +28,10 @@ pthread_mutex_t             g_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 // 2 MiB-aligned base may be unmapped). mmap'd (16 MiB virtual) and lazily paged:
 // only the words covering real segment addresses become resident. Lock-free:
 // readers do an atomic load; register/unregister do atomic fetch_or/fetch_and.
-// Standard x86-64 user VA is <= 2^47 < 2^48, so addr>>21 always fits.
-constexpr unsigned SEG_SHIFT = 21;                            // 2 MiB
-constexpr size_t   PM_SLOTS  = size_t(1) << (48 - SEG_SHIFT); // 2^27 regions
-constexpr size_t   PM_WORDS  = PM_SLOTS / 64;                 // 16 MiB of words
+// Standard x86-64 user VA is <= 2^47 < 2^48, so addr>>SEG_SHIFT always fits.
+constexpr unsigned SEG_SHIFT = SEGMENT_SHIFT;                 // segment granularity
+constexpr size_t   PM_SLOTS  = size_t(1) << (48 - SEG_SHIFT); // 2^(48-shift) regions
+constexpr size_t   PM_WORDS  = PM_SLOTS / 64;                 // pagemap word count
 
 std::atomic<uint64_t>* pagemap() {
     static std::atomic<uint64_t>* pm = []() -> std::atomic<uint64_t>* {
@@ -53,6 +55,20 @@ void pagemap_mark(const void* seg, bool set) {
     uint64_t mask = uint64_t(1) << (bit & 63);
     if (set) pm[bit >> 6].fetch_or(mask, std::memory_order_release);
     else     pm[bit >> 6].fetch_and(~mask, std::memory_order_release);
+}
+
+// MADV_DONTNEED the payload of an empty retired segment, keeping the header
+// page (first page) resident and the mapping registered. Returns the bulk of
+// the segment's physical RSS without unmapping the VA.
+void decommit_segment(SegmentHeader* seg) {
+#ifdef MADV_DONTNEED
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0 || static_cast<size_t>(ps) >= SEGMENT_SIZE) return;
+    uintptr_t from = reinterpret_cast<uintptr_t>(seg) + static_cast<uintptr_t>(ps);
+    (void) madvise(reinterpret_cast<void*>(from),
+                   SEGMENT_SIZE - static_cast<size_t>(ps), MADV_DONTNEED);
+#endif
+    seg->decommitted = true;
 }
 
 void* aligned_mmap_2mib() {
@@ -92,6 +108,18 @@ void* aligned_mmap_2mib() {
 
 } // namespace
 
+ReapMode reap_mode() {
+    static ReapMode m = []() {
+        const char* e = std::getenv("TBJIT_REAP_MODE");
+        if (e) {
+            if (std::strcmp(e, "eager")   == 0) return ReapMode::Eager;
+            if (std::strcmp(e, "madvise") == 0) return ReapMode::Madvise;
+        }
+        return ReapMode::Conservative;
+    }();
+    return m;
+}
+
 uint32_t current_tid() {
 #if defined(__linux__)
     static thread_local uint32_t cached = 0;
@@ -126,6 +154,7 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
     h->strategy     = s;
     h->retired      = false;
     h->class_idx    = 0;
+    h->decommitted  = false;
     h->slot_index   = slot;
     h->alloc_site   = site;
     h->owner_tid    = current_tid();
@@ -141,8 +170,9 @@ SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
 }
 
 size_t reaper_sweep(LifetimePredicate pred) {
-    // Snapshot eligible segments under the index lock, then munmap outside it
-    // so munmap doesn't block other threads' registration.
+    // Snapshot eligible segments under the index lock, then reclaim outside it
+    // so munmap/madvise doesn't block other threads' registration.
+    ReapMode mode = reap_mode();
     SegmentHeader* eligible[MAX_SEGMENTS];
     size_t n_eligible = 0;
 
@@ -152,13 +182,20 @@ size_t reaper_sweep(LifetimePredicate pred) {
         SegmentHeader* h = g_index[i].load(std::memory_order_relaxed);
         if (!h || !h->retired) continue;
         if (h->live_chunks.load(std::memory_order_acquire) != 0) continue;
-        if (pred && !pred(h->alloc_site)) continue;
+        // Conservative keeps the Reap-tag gate; eager/madvise drop it and rely
+        // solely on the live_chunks==0 safety invariant.
+        if (mode == ReapMode::Conservative && pred && !pred(h->alloc_site))
+            continue;
+        // Madvise decommits a segment once, then leaves it registered/mapped.
+        if (mode == ReapMode::Madvise && h->decommitted) continue;
         eligible[n_eligible++] = h;
     }
     pthread_mutex_unlock(&g_index_mutex);
 
-    for (size_t i = 0; i < n_eligible; ++i)
-        free_segment(eligible[i]);
+    for (size_t i = 0; i < n_eligible; ++i) {
+        if (mode == ReapMode::Madvise) decommit_segment(eligible[i]);
+        else                           free_segment(eligible[i]);
+    }
     return n_eligible;
 }
 

@@ -42,11 +42,29 @@ static void test_reset() {
     assert(h.dominant_size() == 0);
 }
 
+static void test_overflow_flag() {
+    // More than CAP distinct sizes -> overflow set; total still accurate.
+    tbjit::analysis::ExactHistogram h;
+    const uint32_t distinct = tbjit::analysis::ExactHistogram::CAP + 10;
+    for (uint32_t s = 1; s <= distinct; ++s) h.record(s);
+    assert(h.overflow);
+    assert(h.count() == distinct);
+}
+
+static void test_sparse_is_compact() {
+    // The whole point of the sparse rewrite: a histogram must be far smaller
+    // than the old dense counts[4096] (16 KiB). At CAP=64 it is ~0.5 KiB.
+    static_assert(sizeof(tbjit::analysis::ExactHistogram) < 4096,
+                  "sparse histogram must be much smaller than dense 16 KiB");
+}
+
 int main() {
     test_exact_quantiles();
     test_boundary();
     test_monomorphic();
     test_not_monomorphic();
     test_reset();
+    test_overflow_flag();
+    test_sparse_is_compact();
     return 0;
 }

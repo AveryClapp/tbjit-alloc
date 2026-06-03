@@ -6,14 +6,21 @@
 
 namespace tbjit::seg {
 
-constexpr size_t    SEGMENT_SIZE = 2ull * 1024 * 1024;  // 2 MiB
+// Segment granularity. Compile-time so it can be swept (the memory frontier
+// study); overridable with -DTBJIT_SEG_SHIFT=N. Default 21 => 2 MiB, which
+// matches the x86-64 hugepage size (see the MADV_HUGEPAGE hint in segment.cpp).
+#ifndef TBJIT_SEG_SHIFT
+#define TBJIT_SEG_SHIFT 21
+#endif
+constexpr unsigned  SEGMENT_SHIFT = TBJIT_SEG_SHIFT;
+constexpr size_t    SEGMENT_SIZE = size_t(1) << SEGMENT_SHIFT;
 constexpr uintptr_t SEGMENT_MASK = ~(static_cast<uintptr_t>(SEGMENT_SIZE) - 1);
 
 struct alignas(64) SegmentHeader {
     Strategy              strategy;
     bool                  retired;        // true after a fresh active replaces it
     uint8_t               class_idx;      // MultiSizeFreeList: which class (0..3)
-    uint8_t               _pad0;
+    bool                  decommitted;    // madvise reap mode: payload returned to OS
     uint32_t              slot_index;
     CallSiteID            alloc_site;
     uint32_t              owner_tid;
@@ -53,6 +60,17 @@ inline SegmentHeader* of(const void* p) {
 SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size);
 void           free_segment(SegmentHeader* seg);
+
+// Segment-return policy (TBJIT_REAP_MODE, read once lazily):
+//   Conservative — current default: reap only retired+empty segments whose
+//                  alloc_site is Reap-tagged (LifetimePredicate gate).
+//   Eager        — reap any retired+empty segment, dropping the tag gate;
+//                  relies solely on the live_chunks==0 safety invariant.
+//   Madvise      — like Eager but MADV_DONTNEED the payload instead of munmap,
+//                  returning physical RSS while keeping the VA mapping (cheaper
+//                  to re-acquire on churny workloads).
+enum class ReapMode : uint8_t { Conservative, Eager, Madvise };
+ReapMode reap_mode();
 
 bool is_managed(const SegmentHeader* seg);
 size_t segment_count();  // registered segments (is_managed scans this many)

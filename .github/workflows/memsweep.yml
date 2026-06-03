@@ -1,0 +1,84 @@
+name: Memory-frontier sweep
+
+# Traces the RSS-vs-latency frontier over the three memory knobs (HIST_CAP,
+# SEG_SHIFT, REAP_MODE), one knob at a time from a baseline. See
+# bench/realworkload/bound_sweep.sh. Rebuilds tbjit_bound_bench per
+# compile-config, so this is heavier than the bound-replay bench; manual
+# dispatch only. LD_PRELOAD capture is Linux-only, so CI is the only venue.
+
+on:
+  workflow_dispatch:
+    inputs:
+      passes:
+        description: 'Timed passes per backend (p50 over this many)'
+        required: false
+        default: '15'
+        type: string
+
+jobs:
+  memsweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential util-linux \
+            openssl perl g++ python3-matplotlib
+
+      - name: Configure + build (for trace capture)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Run memory-frontier sweep
+        env:
+          BOUND_BENCH_PASSES: ${{ inputs.passes }}
+        run: |
+          mkdir -p bench-out
+          bash bench/realworkload/bound_sweep.sh build bench-out/memsweep \
+            | tee bench-out/memsweep-run.log
+
+      - name: Plot frontier + print Pareto/knee
+        if: always()
+        run: |
+          if [ -s bench-out/memsweep/sweep_results.tsv ]; then
+            python3 tools/plot_sweep.py bench-out/memsweep/sweep_results.tsv \
+              bench-out/figures | tee bench-out/memsweep-frontier.txt
+          fi
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## Memory-frontier sweep"
+            echo
+            if [ -s bench-out/memsweep/sweep_results.tsv ]; then
+              echo '| cap | shift | reap | backend | workload | p50_ns | rss_kb | jit_served |'
+              echo '|--:|--:|---|---|---|--:|--:|--:|'
+              tail -n +2 bench-out/memsweep/sweep_results.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6,$8,$9}'
+              echo
+              echo '### Pareto frontier / knee'
+              echo '```'
+              cat bench-out/memsweep-frontier.txt 2>/dev/null || true
+              echo '```'
+            else
+              echo "_no sweep TSV produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memsweep-${{ github.sha }}
+          path: |
+            bench-out/memsweep/
+            bench-out/memsweep-run.log
+            bench-out/figures/mem_frontier.pdf
+          retention-days: 90
