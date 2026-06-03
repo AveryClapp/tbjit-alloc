@@ -61,22 +61,49 @@ done
 rm -f "$TRACE_DIR"/*.trace; rmdir "$TRACE_DIR" 2>/dev/null || true
 
 # ---------- latency: hold/monomorphic with THP on/off ----------
+# Reps are interleaved (glibc/always/never within each rep) so any runner drift
+# hits all configs equally -- defeats the time-ordering confound that made the
+# earlier segshift trend suspect. Aggregate with median offline.
 LAT="$OUT/thp_lat.tsv"
-printf "thp\tbench\tphase\tns_per_op\n" > "$LAT"
-emit_lat() { local thp=$1 b=$2
+printf "thp\tbench\trep\tphase\tns_per_op\n" > "$LAT"
+emit_lat() { local thp=$1 b=$2 rep=$3
   while read -r ph ns _; do
-    [[ -n "$ns" ]] && printf "%s\t%s\t%s\t%s\n" "$thp" "$b" "${ph%:}" "$ns" >> "$LAT"
+    [[ -n "$ns" ]] && printf "%s\t%s\t%s\t%s\t%s\n" "$thp" "$b" "$rep" "${ph%:}" "$ns" >> "$LAT"
   done
 }
-for b in hold monomorphic; do
-  bin="$BUILD/bench/bench_${b}"
-  [[ -x "$bin" ]] || { echo "[skip $b] no binary" >&2; continue; }
-  "${SETARCH[@]}" "$bin" | emit_lat glibc "$b"
-  for thp in always never; do
-    pre=(LD_PRELOAD="$LIB"); [[ "$thp" == never ]] && pre+=(TBJIT_THP=never)
-    "${SETARCH[@]}" env "${pre[@]}" "$bin" | emit_lat "$thp" "$b"
+REPS="${THP_LAT_REPS:-5}"
+for rep in $(seq 1 "$REPS"); do
+  for b in hold monomorphic; do
+    bin="$BUILD/bench/bench_${b}"
+    [[ -x "$bin" ]] || continue
+    "${SETARCH[@]}" "$bin" | emit_lat glibc "$b" "$rep"
+    for thp in always never; do
+      pre=(LD_PRELOAD="$LIB"); [[ "$thp" == never ]] && pre+=(TBJIT_THP=never)
+      "${SETARCH[@]}" env "${pre[@]}" "$bin" | emit_lat "$thp" "$b" "$rep"
+    done
   done
 done
 
+# Median/min/max per (thp,bench) for the steady phase, to expose CI noise.
+SUM="$OUT/thp_lat_summary.tsv"
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$LAT" "$SUM" <<'PY'
+import sys, statistics, collections
+lat, out = sys.argv[1], sys.argv[2]
+g = collections.defaultdict(list)
+with open(lat) as f:
+    h = f.readline().rstrip("\n").split("\t"); i = {k: n for n, k in enumerate(h)}
+    for ln in f:
+        r = ln.rstrip("\n").split("\t")
+        if len(r) < len(h) or r[i["phase"]] != "steady":
+            continue
+        g[(r[i["thp"]], r[i["bench"]])].append(float(r[i["ns_per_op"]]))
+with open(out, "w") as w:
+    w.write("thp\tbench\tmedian_ns\tmin_ns\tmax_ns\tn\n")
+    for (thp, b), v in sorted(g.items()):
+        w.write(f"{thp}\t{b}\t{statistics.median(v):.1f}\t{min(v):.1f}\t{max(v):.1f}\t{len(v)}\n")
+PY
+fi
+
 echo "==== RSS (kB) ===="; column -t -s$'\t' < "$RSS"
-echo "==== LATENCY (ns/op) ===="; column -t -s$'\t' < "$LAT"
+echo "==== LATENCY median steady (ns/op) ===="; [[ -f "$SUM" ]] && column -t -s$'\t' < "$SUM"

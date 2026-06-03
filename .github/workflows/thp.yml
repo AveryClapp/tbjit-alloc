@@ -35,6 +35,12 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel "$(nproc)"
 
+      - name: Record runner THP mode
+        if: always()
+        run: |
+          echo "transparent_hugepage/enabled: $(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo n/a)"
+          echo "transparent_hugepage/defrag:  $(cat /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || echo n/a)"
+
       - name: THP isolation
         env:
           BOUND_BENCH_PASSES: ${{ inputs.passes }}
@@ -57,12 +63,12 @@ jobs:
                 | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
             fi
             echo
-            if [ -s bench-out/thp/thp_lat.tsv ]; then
-              echo "### Latency (ns/op)"
-              echo '| thp | bench | phase | ns/op |'
-              echo '|---|---|---|--:|'
-              tail -n +2 bench-out/thp/thp_lat.tsv \
-                | awk -F'\t' '{printf "| %s | %s | %s | %s |\n",$1,$2,$3,$4}'
+            if [ -s bench-out/thp/thp_lat_summary.tsv ]; then
+              echo "### Latency median steady (ns/op)"
+              echo '| thp | bench | median_ns | min_ns | max_ns | n |'
+              echo '|---|---|--:|--:|--:|--:|'
+              tail -n +2 bench-out/thp/thp_lat_summary.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -112,10 +112,19 @@ void* aligned_mmap_2mib() {
     // and the `hold` bench gap (mimalloc 6.9 ns vs ours ~87 ns/op tracked
     // closely with TLB-miss cost) is what this targets. madvise is
     // best-effort: if THP is disabled at the kernel level, the segment
-    // stays backed by 4 KiB pages, no harm done. Disabled by TBJIT_THP=never.
-    if (thp_hint())
+    // stays backed by 4 KiB pages, no harm done. Disabled by TBJIT_THP=never,
+    // which actively opts the region OUT with MADV_NOHUGEPAGE -- merely skipping
+    // the hint does nothing when the system THP mode is "always".
+    if (thp_hint()) {
         (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
                        MADV_HUGEPAGE);
+    }
+#if defined(MADV_NOHUGEPAGE)
+    else {
+        (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
+                       MADV_NOHUGEPAGE);
+    }
+#endif
 #endif
 
     return reinterpret_cast<void*>(aligned_lo);
