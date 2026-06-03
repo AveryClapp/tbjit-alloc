@@ -502,4 +502,6 @@ uint64_t events_processed() {
     return g_events_processed.load(std::memory_order_relaxed);
 }
 
+size_t summary_count() { return g_summary_count; }
+
 } // namespace tbjit::analysis

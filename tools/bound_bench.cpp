@@ -302,6 +302,14 @@ long current_rss_kb() {
 #endif
 }
 
+// Reaper predicate for the footprint measurement: mirrors the live system's
+// reap_predicate (reclaim a site whose learned lifetime is Reap). Used only by
+// the conservative reap mode; eager/madvise ignore it and reclaim any retired,
+// empty segment.
+inline bool bench_reap_pred(CallSiteID site) {
+    return analysis::get_lifetime_tag(site) == analysis::LifetimeTag::Reap;
+}
+
 // Re-point each alloc op at its site's currently-installed routine. Run after
 // the learning pass and again after each replay pass: sites that deopt during
 // replay revert to null here, so the bound backend stops calling a stale routine
@@ -464,15 +472,30 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Space: the allocator's own high-water footprint for this stream, measured
-    // as the ru_maxrss growth across ONE full replay with no reclamation (so it
-    // reflects the real peak live set, not the reclaim-bounded steady state the
-    // timed passes below run in). One pass mirrors the original process, which
-    // survived this footprint live.
+    // Space: the allocator's footprint for this stream = segment growth across
+    // ONE full replay + the resident profiling structures. One pass mirrors the
+    // original process, which survived this footprint live (net-live set held).
+    //
+    // Two terms, because the memory knobs move different ones:
+    //   seg_kb  — RSS delta across the pass (SEG_SHIFT-dependent). After the
+    //             pass we run the reaper so TBJIT_REAP_MODE affects this term:
+    //             the live system reclaims on a background thread; this
+    //             synchronous proxy reaps once. The net-live set is still held,
+    //             so only retired, empty segments are eligible (safety invariant
+    //             preserved).
+    //   prof_kb — g_summaries resident (HIST_CAP-dependent). It is touched in the
+    //             learning pass, so it already sits in rss_before and is NOT in
+    //             the segment delta; add it back explicitly. Exact: each used
+    //             summary slot is fully written.
     long rss_before = current_rss_kb();
     run_pass(backend, r.ops, live);
-    long rss_footprint = current_rss_kb() - rss_before;
-    if (rss_footprint < 0) rss_footprint = 0;
+    if (backend != Backend::Glibc) seg::reaper_sweep(bench_reap_pred);
+    long seg_kb = current_rss_kb() - rss_before;
+    if (seg_kb < 0) seg_kb = 0;
+    long prof_kb = (backend == Backend::Glibc) ? 0
+        : static_cast<long>(analysis::summary_count()
+                            * sizeof(analysis::CallSiteSummary) / 1024);
+    long rss_footprint = seg_kb + prof_kb;
     reclaim_leaked(backend, r.leaked, live);
 
     // Latency: warmup then timed passes, reclaiming leaked allocs between each so
@@ -517,9 +540,9 @@ int main(int argc, char** argv) {
     double ci95 = 1.96 * std::sqrt(var) / std::sqrt(static_cast<double>(n));
 
     fprintf(stderr,
-        "bound_bench: p50=%.3f ns/alloc  ci95=%.3f  one-pass rss_footprint=%ld kB"
-        "  passes=%d\n",
-        p50, ci95, rss_footprint, passes);
+        "bound_bench: p50=%.3f ns/alloc  ci95=%.3f  rss_footprint=%ld kB "
+        "(seg=%ld prof=%ld)  passes=%d\n",
+        p50, ci95, rss_footprint, seg_kb, prof_kb, passes);
 
     printf("%s\t%s\t%.3f\t%.3f\t%ld\t%.4f\n",
            backend_name, label.c_str(), p50, ci95, rss_footprint, matched_frac);
