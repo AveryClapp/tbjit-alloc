@@ -1,0 +1,63 @@
+name: THP end-to-end RSS
+
+# Validates the conditional-THP policy in the real deployment: runs the corpus
+# under LD_PRELOAD=libtbjit with TBJIT_THP always vs auto and measures process
+# max-RSS with GNU time. Confirms whether the 74% allocator-level RSS cut
+# translates to deployment RSS. CI only (LD_PRELOAD); manual dispatch.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  thp_e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential util-linux time \
+            openssl perl g++
+
+      - name: Configure + build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)"
+
+      - name: End-to-end THP RSS
+        run: |
+          mkdir -p bench-out
+          bash bench/realworkload/thp_e2e.sh build bench-out/thp_e2e \
+            | tee bench-out/thp_e2e-run.log
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## THP end-to-end RSS (LD_PRELOAD, GNU time)"
+            echo
+            if [ -s bench-out/thp_e2e/thp_e2e.tsv ]; then
+              echo '| config | workload | wall_s | max_rss_kb |'
+              echo '|---|---|--:|--:|'
+              tail -n +2 bench-out/thp_e2e/thp_e2e.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s |\n",$1,$2,$3,$4}'
+              echo
+              echo '```'
+              sed -n '/auto\/always max-RSS ratio/,$p' bench-out/thp_e2e-run.log 2>/dev/null || true
+              echo '```'
+            else
+              echo "_no TSV produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thp-e2e-${{ github.sha }}
+          path: |
+            bench-out/thp_e2e/
+            bench-out/thp_e2e-run.log
+          retention-days: 90
