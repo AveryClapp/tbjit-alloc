@@ -1,0 +1,60 @@
+name: Segment-size latency check
+
+# Measures the latency cost of shrinking SEGMENT_SIZE on the TLB-sensitive
+# alloc-churn microbenches (hold, monomorphic). Pairs with the memory-frontier
+# sweep: that showed smaller segments cut RSS 50-75% for free on replay traces;
+# this checks whether the THP/hugepage benefit (the 2 MiB rationale) costs
+# throughput on the workload that motivated it. JIT is x86-64, so CI only.
+# Manual dispatch.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  segshift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential util-linux g++
+
+      - name: Configure + build (bench binaries + glibc baseline)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)"
+
+      - name: Segment-size sweep
+        run: |
+          mkdir -p bench-out
+          bash bench/seg_shift_sweep.sh bench-out/segshift \
+            | tee bench-out/segshift-run.log
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## Segment-size latency check (hold / monomorphic)"
+            echo
+            if [ -s bench-out/segshift/segshift_hold.tsv ]; then
+              echo '| seg_shift | bench | strategy | phase | ns/op |'
+              echo '|--:|---|---|---|--:|'
+              tail -n +2 bench-out/segshift/segshift_hold.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5}'
+            else
+              echo "_no TSV produced_"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: segshift-${{ github.sha }}
+          path: |
+            bench-out/segshift/
+            bench-out/segshift-run.log
+          retention-days: 90
