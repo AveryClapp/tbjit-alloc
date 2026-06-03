@@ -1,0 +1,64 @@
+name: Gate 1 (option-2 THP kill-shot)
+
+# Option-2 viability gate: does jemalloc's own THP handling already sit at the
+# RSS knee, or is there slack a lifetime-aware policy could shed? Runs the
+# synthetic ground-truth probe + real workloads under glibc/mimalloc/jemalloc
+# {never,always,default} and applies the pre-registered decision rule. The RSS
+# half runs here; the TLB half needs bare metal (perf PMU), which this job
+# reports as available/UNAVAILABLE. CI only; manual dispatch.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gate1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential util-linux time \
+            libjemalloc-dev libmimalloc-dev openssl sqlite3 \
+            linux-tools-common linux-tools-generic || true
+          # jemalloc/mimalloc runtime .so (resolve_allocator looks via ldconfig)
+          sudo apt-get install -y libjemalloc2 libmimalloc2.0 || true
+
+      - name: Record runner THP + PMU state
+        run: |
+          echo "system THP: $(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo n/a)"
+          echo "perf_event_paranoid: $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo n/a)"
+          sudo sysctl -w kernel.perf_event_paranoid=0 2>/dev/null || true
+
+      - name: Run Gate 1
+        run: |
+          mkdir -p bench-out
+          bash bench/gate1.sh bench-out/gate1 | tee bench-out/gate1-run.log
+
+      - name: Render verdict into job summary
+        if: always()
+        run: |
+          {
+            echo "## Gate 1 verdict (option-2 THP kill-shot)"
+            echo
+            echo '```'
+            cat bench-out/gate1/gate1_verdict.txt 2>/dev/null || echo "(no verdict produced)"
+            echo '```'
+            echo
+            echo "### Environment"
+            echo '```'
+            cat bench-out/gate1/logs/env.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate1-${{ github.sha }}
+          path: |
+            bench-out/gate1/
+            bench-out/gate1-run.log
+          retention-days: 90
