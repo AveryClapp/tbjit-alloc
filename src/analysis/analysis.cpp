@@ -308,7 +308,15 @@ void init() {
     init_state();
 }
 
+// THP policy predicate for TBJIT_THP=auto: Hold-tagged sites (long-lived pools,
+// full segments, TLB-bound) keep transparent hugepages; churn sites drop them to
+// avoid faulting whole 2 MiB hugepages for partially-filled segments.
+bool thp_wants_huge(CallSiteID site) {
+    return get_lifetime_tag(site) == LifetimeTag::Hold;
+}
+
 void init_state() {
+    seg::set_thp_predicate(thp_wants_huge);
     if (!g_summaries) {
         // The summary array is ~256 MiB for MAX_CALL_SITES=4096 — too large
         // for the 4 MiB internal bump arena. Use mmap directly.

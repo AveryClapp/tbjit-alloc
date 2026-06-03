@@ -71,21 +71,34 @@ void decommit_segment(SegmentHeader* seg) {
     seg->decommitted = true;
 }
 
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
-// Whether to hint transparent hugepages for new segments (TBJIT_THP, read once
-// lazily). Default on (the 2 MiB rationale). "never" disables it, which lets us
-// isolate whether the segment RSS slack comes from THP faulting whole hugepages
-// for partially-filled segments vs. raw segment size.
-bool thp_hint() {
-    static bool on = []() {
+// THP policy for new segments (TBJIT_THP, read once lazily). Default "always"
+// (the 2 MiB rationale); "never" actively opts out; "auto" defers per-site to
+// the registered predicate (Hold sites keep THP, churn sites drop it).
+enum class ThpMode { Always, Never, Auto };
+ThpMode thp_mode() {
+    static ThpMode m = []() {
         const char* e = std::getenv("TBJIT_THP");
-        return !(e && std::strcmp(e, "never") == 0);
+        if (e) {
+            if (std::strcmp(e, "never") == 0) return ThpMode::Never;
+            if (std::strcmp(e, "auto")  == 0) return ThpMode::Auto;
+        }
+        return ThpMode::Always;
     }();
-    return on;
+    return m;
 }
-#endif
 
-void* aligned_mmap_2mib() {
+ThpPredicate g_thp_pred = nullptr;
+
+// Resolve the THP decision for a segment about to be created for `site`.
+bool want_hugepage(CallSiteID site) {
+    switch (thp_mode()) {
+        case ThpMode::Never: return false;
+        case ThpMode::Auto:  return g_thp_pred ? g_thp_pred(site) : true;
+        default:             return true;
+    }
+}
+
+void* aligned_mmap_2mib(bool huge) {
     // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
     // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
     // and the kernel coalesces neighboring unmapped regions.
@@ -112,10 +125,10 @@ void* aligned_mmap_2mib() {
     // and the `hold` bench gap (mimalloc 6.9 ns vs ours ~87 ns/op tracked
     // closely with TLB-miss cost) is what this targets. madvise is
     // best-effort: if THP is disabled at the kernel level, the segment
-    // stays backed by 4 KiB pages, no harm done. Disabled by TBJIT_THP=never,
-    // which actively opts the region OUT with MADV_NOHUGEPAGE -- merely skipping
-    // the hint does nothing when the system THP mode is "always".
-    if (thp_hint()) {
+    // stays backed by 4 KiB pages, no harm done. `huge`==false actively opts the
+    // region OUT with MADV_NOHUGEPAGE -- merely skipping the hint does nothing
+    // when the system THP mode is "always".
+    if (huge) {
         (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
                        MADV_HUGEPAGE);
     }
@@ -125,12 +138,16 @@ void* aligned_mmap_2mib() {
                        MADV_NOHUGEPAGE);
     }
 #endif
+#else
+    (void) huge;
 #endif
 
     return reinterpret_cast<void*>(aligned_lo);
 }
 
 } // namespace
+
+void set_thp_predicate(ThpPredicate pred) { g_thp_pred = pred; }
 
 ReapMode reap_mode() {
     static ReapMode m = []() {
@@ -172,7 +189,7 @@ void* mpsc_harvest(SegmentHeader* seg) {
 
 SegmentHeader* alloc_segment(Strategy s, uint32_t slot,
                              CallSiteID site, uint32_t chunk_size) {
-    void* mem = aligned_mmap_2mib();
+    void* mem = aligned_mmap_2mib(want_hugepage(site));
     if (!mem) return nullptr;
     auto* h = static_cast<SegmentHeader*>(mem);
     h->strategy     = s;

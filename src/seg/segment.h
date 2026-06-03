@@ -72,6 +72,14 @@ void           free_segment(SegmentHeader* seg);
 enum class ReapMode : uint8_t { Conservative, Eager, Madvise };
 ReapMode reap_mode();
 
+// Per-site THP policy (TBJIT_THP=auto): a registered predicate decides whether a
+// new segment for `site` gets MADV_HUGEPAGE. Lets Hold-tagged sites keep the TLB
+// benefit (their segments are full, so no RSS slack) while churn sites drop THP,
+// which otherwise faults whole 2 MiB hugepages for partially-filled segments
+// (the dominant RSS slack). Modes always (default) / never ignore the predicate.
+using ThpPredicate = bool (*)(CallSiteID site);
+void set_thp_predicate(ThpPredicate pred);
+
 bool is_managed(const SegmentHeader* seg);
 size_t segment_count();  // registered segments (is_managed scans this many)
 void register_segment(SegmentHeader* seg);

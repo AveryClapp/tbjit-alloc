@@ -47,9 +47,9 @@ for name in "${!TRACE_OF[@]}"; do
          --passes "$PASSES" 2>/dev/null | tail -1)" || true
   IFS=$'\t' read -r _b _w p50 _c rss _m <<<"$row"
   printf "NA\tglibc\t%s\t%s\t%s\t1.000\n" "$name" "$p50" "$rss" >> "$RSS"
-  for thp in always never; do
+  for thp in always never auto; do
     lg="$LOG/rss_${name}_${thp}.log"
-    pre=(); [[ "$thp" == never ]] && pre=(TBJIT_THP=never)
+    pre=(); [[ "$thp" != always ]] && pre=(TBJIT_THP="$thp")
     row="$(env "${pre[@]}" "$BENCH" "${TRACE_OF[$name]}" --backend bound \
            --label "$name" --passes "$PASSES" --profile 2>"$lg" | tail -1)" || {
       echo "[fail rss $name $thp] see $lg" >&2; continue; }
@@ -77,8 +77,8 @@ for rep in $(seq 1 "$REPS"); do
     bin="$BUILD/bench/bench_${b}"
     [[ -x "$bin" ]] || continue
     "${SETARCH[@]}" "$bin" | emit_lat glibc "$b" "$rep"
-    for thp in always never; do
-      pre=(LD_PRELOAD="$LIB"); [[ "$thp" == never ]] && pre+=(TBJIT_THP=never)
+    for thp in always never auto; do
+      pre=(LD_PRELOAD="$LIB"); [[ "$thp" != always ]] && pre+=(TBJIT_THP="$thp")
       "${SETARCH[@]}" env "${pre[@]}" "$bin" | emit_lat "$thp" "$b" "$rep"
     done
   done
