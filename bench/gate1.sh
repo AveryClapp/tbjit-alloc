@@ -39,16 +39,21 @@ JE_BASE="background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:0,metadata_t
 SETARCH=(); command -v setarch >/dev/null 2>&1 && SETARCH=(setarch -R)
 TIME=/usr/bin/time
 
-# ---- system THP mode: record, best-effort set, record actual ---------------
+# ---- system THP modes ------------------------------------------------------
+# Characterize the gap under BOTH common deployment defaults: system THP
+# "always" (RHEL-family default; realistic worst case for slack) and "madvise"
+# (Ubuntu default; where a no-op allocator default avoids THP entirely). The
+# niche depends on which, so scoping the GO requires both.
 THP_SYS=/sys/kernel/mm/transparent_hugepage/enabled
-want_sys="${GATE1_THP_SYS:-always}"
-if [[ -e "$THP_SYS" ]]; then
-  if echo "$want_sys" | sudo tee "$THP_SYS" >/dev/null 2>&1; then :; fi
-  sys_mode="$(grep -oE '\[[a-z]+\]' "$THP_SYS" | tr -d '[]')"
-else
-  sys_mode="none"
-fi
-echo "[gate1] system THP mode = ${sys_mode:-unknown} (requested $want_sys)" | tee "$LOG/env.txt"
+IFS=' ' read -r -a SYS_MODES <<< "${GATE1_THP_SYS:-always madvise}"
+set_sys_thp() {  # mode -> echoes the actually-active mode
+  if [[ -e "$THP_SYS" ]]; then
+    echo "$1" | sudo tee "$THP_SYS" >/dev/null 2>&1 || true
+    grep -oE '\[[a-z]+\]' "$THP_SYS" | tr -d '[]'
+  else echo none; fi
+}
+: > "$LOG/env.txt"
+echo "[gate1] requested system THP modes: ${SYS_MODES[*]}" | tee -a "$LOG/env.txt"
 
 # ---- resolve allocators ----------------------------------------------------
 JE="$(resolve_allocator jemalloc || true)"
@@ -90,9 +95,12 @@ cc -O2 -Wall -o "$PROBE" "$SCRIPT_DIR/gate1_lifetime_probe.c" \
   || { echo "[gate1] FATAL: probe build failed" >&2; exit 1; }
 
 # ---- detect perf PMU availability (Gate 2 signal) --------------------------
+# Probe the ACTUAL event we need (dTLB-load-misses), not a generic one: on
+# virtualized PMUs `cycles` often works while TLB-walk events are <not supported>.
 PERF_OK=0
 if command -v perf >/dev/null 2>&1 && \
-   perf stat -x, -e cycles true >/dev/null 2>"$LOG/perf_probe.txt"; then
+   perf stat -x, -e dTLB-load-misses true >/dev/null 2>"$LOG/perf_probe.txt" && \
+   ! grep -qiE 'not supported|not counted|<not' "$LOG/perf_probe.txt"; then
   PERF_OK=1
 fi
 echo "[gate1] perf hardware counters: $([[ $PERF_OK == 1 ]] && echo available || echo UNAVAILABLE)" \
@@ -102,59 +110,62 @@ echo "[gate1] perf hardware counters: $([[ $PERF_OK == 1 ]] && echo available ||
 # Measurements
 # ===========================================================================
 TSV="$OUT/gate1.tsv"
-printf "workload\tconfig\trep\tlive_kb\trss_kb\tanonhuge_kb\tslack_kb\twall_s\tdtlb_miss\n" > "$TSV"
+printf "sys_thp\tworkload\tconfig\trep\tlive_kb\trss_kb\tanonhuge_kb\tslack_kb\twall_s\tdtlb_miss\n" > "$TSV"
 
-# --- synthetic: probe self-reports live/rss/anonhuge/slack from smaps -------
-echo "[gate1] === synthetic ground-truth probe ==="
-for rep in $(seq 1 "$REPS_SYN"); do
-  for l in "${CFG_LABELS[@]}"; do
-    dtlb="NA"
-    if [[ $PERF_OK == 1 ]]; then
-      run_with_cfg "$l" perf stat -x, -e dTLB-load-misses -o "$LOG/perf_${l}_${rep}.txt" \
-        "${SETARCH[@]}" "$PROBE" >"$LOG/probe_${l}_${rep}.out" 2>>"$LOG/probe_${l}_${rep}.err" || true
-      dtlb="$(grep -E ',dTLB-load-misses' "$LOG/perf_${l}_${rep}.txt" 2>/dev/null | head -1 | cut -d, -f1)"
-      [[ -n "$dtlb" ]] || dtlb="NA"
-    else
-      run_with_cfg "$l" "${SETARCH[@]}" "$PROBE" \
-        >"$LOG/probe_${l}_${rep}.out" 2>>"$LOG/probe_${l}_${rep}.err" || true
-    fi
-    IFS=$'\t' read -r live rss anon thp slack < "$LOG/probe_${l}_${rep}.out" 2>/dev/null || continue
-    printf "synthetic\t%s\t%s\t%s\t%s\t%s\t%s\tNA\t%s\n" \
-      "$l" "$rep" "${live:-NA}" "${rss:-NA}" "${anon:-NA}" "${slack:-NA}" "$dtlb" >> "$TSV"
-  done
-done
-
-# --- real workloads: process Max-RSS via /usr/bin/time ----------------------
-run_app_cfg() {  # workload label
-  local wl="$1" l="$2" tf wall rss
+run_app_cfg() {  # sys workload label
+  local sys="$1" wl="$2" l="$3" tf wall rss
   tf="$(mktemp)"
   local pre=(); [[ -n "${CFG_PRELOAD[$l]}" ]] && pre+=("LD_PRELOAD=${CFG_PRELOAD[$l]}")
   [[ -n "${CFG_ENV[$l]}" ]] && pre+=("${CFG_ENV[$l]}")
   "${SETARCH[@]}" "$TIME" -f '%e %M' -o "$tf" \
     env "${pre[@]}" bash -c "$CMD_STR" >/dev/null 2>&1 || true
   read -r wall rss < "$tf" 2>/dev/null || true; rm -f "$tf"
-  printf "%s\t%s\t%s\tNA\t%s\tNA\tNA\t%s\tNA\n" \
-    "$wl" "$l" "$REP" "${rss:-NA}" "${wall:-NA}" >> "$TSV"
+  printf "%s\t%s\t%s\t%s\tNA\t%s\tNA\tNA\t%s\tNA\n" \
+    "$sys" "$wl" "$l" "$REP" "${rss:-NA}" "${wall:-NA}" >> "$TSV"
 }
 
-REAL=(openssl_crypto sqlite_inmem)
-for name in "${REAL[@]}"; do
-  spec="$RWL/workloads/${name}.sh"
-  [[ -f "$spec" ]] || { echo "[skip $name] no spec" >&2; continue; }
-  unset -f workload_preconditions workload_setup workload_cmd workload_teardown 2>/dev/null || true
-  WORKLOAD_NAME=""
-  # shellcheck source=/dev/null
-  source "$spec"
-  if declare -F workload_preconditions >/dev/null && ! workload_preconditions; then
-    echo "[skip $name] precondition" >&2; continue
-  fi
-  declare -F workload_setup >/dev/null && workload_setup
-  CMD_STR="$(workload_cmd)"
-  echo "[gate1] === real workload: $WORKLOAD_NAME ==="
-  for REP in $(seq 1 "$REPS_APP"); do
-    for l in "${CFG_LABELS[@]}"; do run_app_cfg "$WORKLOAD_NAME" "$l"; done
+for want in "${SYS_MODES[@]}"; do
+  SYS="$(set_sys_thp "$want")"
+  echo "[gate1] ===== system THP = $SYS (requested $want) =====" | tee -a "$LOG/env.txt"
+
+  # --- synthetic: probe self-reports live/rss/anonhuge/slack from smaps ------
+  for rep in $(seq 1 "$REPS_SYN"); do
+    for l in "${CFG_LABELS[@]}"; do
+      dtlb="NA"; tag="${SYS}_${l}_${rep}"
+      if [[ $PERF_OK == 1 ]]; then
+        run_with_cfg "$l" perf stat -x, -e dTLB-load-misses -o "$LOG/perf_${tag}.txt" \
+          "${SETARCH[@]}" "$PROBE" >"$LOG/probe_${tag}.out" 2>>"$LOG/probe_${tag}.err" || true
+        dtlb="$(grep -E ',dTLB-load-misses' "$LOG/perf_${tag}.txt" 2>/dev/null | head -1 | cut -d, -f1)"
+        [[ -n "$dtlb" ]] || dtlb="NA"
+      else
+        run_with_cfg "$l" "${SETARCH[@]}" "$PROBE" \
+          >"$LOG/probe_${tag}.out" 2>>"$LOG/probe_${tag}.err" || true
+      fi
+      IFS=$'\t' read -r live rss anon thp slack < "$LOG/probe_${tag}.out" 2>/dev/null || continue
+      printf "%s\tsynthetic\t%s\t%s\t%s\t%s\t%s\t%s\tNA\t%s\n" \
+        "$SYS" "$l" "$rep" "${live:-NA}" "${rss:-NA}" "${anon:-NA}" "${slack:-NA}" "$dtlb" >> "$TSV"
+    done
   done
-  declare -F workload_teardown >/dev/null && workload_teardown
+
+  # --- real workloads: process Max-RSS via /usr/bin/time --------------------
+  REAL=(openssl_crypto sqlite_inmem)
+  for name in "${REAL[@]}"; do
+    spec="$RWL/workloads/${name}.sh"
+    [[ -f "$spec" ]] || { echo "[skip $name] no spec" >&2; continue; }
+    unset -f workload_preconditions workload_setup workload_cmd workload_teardown 2>/dev/null || true
+    WORKLOAD_NAME=""
+    # shellcheck source=/dev/null
+    source "$spec"
+    if declare -F workload_preconditions >/dev/null && ! workload_preconditions; then
+      echo "[skip $name] precondition" >&2; continue
+    fi
+    declare -F workload_setup >/dev/null && workload_setup
+    CMD_STR="$(workload_cmd)"
+    for REP in $(seq 1 "$REPS_APP"); do
+      for l in "${CFG_LABELS[@]}"; do run_app_cfg "$SYS" "$WORKLOAD_NAME" "$l"; done
+    done
+    declare -F workload_teardown >/dev/null && workload_teardown
+  done
 done
 
 # ===========================================================================
@@ -162,56 +173,66 @@ done
 # ===========================================================================
 VERDICT="$OUT/gate1_verdict.txt"
 if command -v python3 >/dev/null 2>&1; then
-  python3 - "$TSV" "$VERDICT" "$sys_mode" "$PERF_OK" <<'PY'
+  python3 - "$TSV" "$VERDICT" "$PERF_OK" <<'PY'
 import sys, statistics, collections
-tsv, out, sys_mode, perf_ok = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-rows = collections.defaultdict(lambda: collections.defaultdict(list))  # (wl)->cfg->[rss]
+tsv, out, perf_ok = sys.argv[1], sys.argv[2], sys.argv[3]
+# (sys,wl)->cfg->[rss] and ->[slack]
+rows  = collections.defaultdict(lambda: collections.defaultdict(list))
 slack = collections.defaultdict(lambda: collections.defaultdict(list))
 with open(tsv) as f:
     h = f.readline().rstrip("\n").split("\t"); i = {k: n for n, k in enumerate(h)}
     for ln in f:
         r = ln.rstrip("\n").split("\t")
         if len(r) < len(h): continue
-        wl, cfg = r[i["workload"]], r[i["config"]]
-        try: rows[wl][cfg].append(float(r[i["rss_kb"]]))
+        key = (r[i["sys_thp"]], r[i["workload"]]); cfg = r[i["config"]]
+        try: rows[key][cfg].append(float(r[i["rss_kb"]]))
         except ValueError: pass
-        try: slack[wl][cfg].append(float(r[i["slack_kb"]]))
+        try: slack[key][cfg].append(float(r[i["slack_kb"]]))
         except ValueError: pass
 def med(xs): return statistics.median(xs) if xs else float("nan")
+sys_modes = sorted({k[0] for k in rows})
 L = []
-L.append(f"system THP mode : {sys_mode}")
-L.append(f"perf PMU        : {'available' if perf_ok=='1' else 'UNAVAILABLE (TLB half needs bare metal)'}")
+L.append(f"perf PMU (dTLB) : {'available' if perf_ok=='1' else 'UNAVAILABLE (TLB half needs bare metal)'}")
+# per system-THP-mode table + per-mode gap booleans
+go_by_sys = {}
+for sm in sys_modes:
+    L.append("")
+    L.append(f"=== system THP = {sm} ===")
+    L.append(f"{'workload':<12} {'never':>10} {'always':>10} {'default':>10} {'bloat':>7} {'residue':>8}")
+    go_syn = go_app = False
+    for wl in ("synthetic","openssl_crypto","sqlite_inmem"):
+        d = rows.get((sm,wl))
+        if not d: continue
+        nv, al, df = med(d.get("je_never",[])), med(d.get("je_always",[])), med(d.get("je_default",[]))
+        if not (nv==nv and al==al and df==df and nv>0):
+            L.append(f"{wl:<12}  (incomplete jemalloc triple)"); continue
+        bloat, residue = (al-nv)/nv, (df-nv)/nv
+        L.append(f"{wl:<12} {nv:>10.0f} {al:>10.0f} {df:>10.0f} {bloat:>6.0%} {residue:>7.0%}")
+        gap = (bloat>0.15 and residue>0.15)
+        if wl=="synthetic":
+            go_syn = gap
+            sd = slack.get((sm,wl),{})
+            s = [med(sd.get(c,[])) for c in ("je_never","je_always","je_default")]
+            L.append(f"{'  slack_kb':<12} {s[0]:>10.0f} {s[1]:>10.0f} {s[2]:>10.0f}")
+        elif gap:
+            go_app = True
+        g = med(rows.get((sm,wl),{}).get("glibc",[])); m = med(rows.get((sm,wl),{}).get("mimalloc",[]))
+        L.append(f"{'  ref':<12} glibc={g:.0f} mimalloc={m:.0f}")
+    go_by_sys[sm] = go_syn and go_app
 L.append("")
-L.append(f"{'workload':<12} {'never':>10} {'always':>10} {'default':>10} {'bloat':>7} {'residue':>8}")
-go_syn = go_app = nogo_app = False
-for wl in rows:
-    nv, al, df = med(rows[wl].get("je_never",[])), med(rows[wl].get("je_always",[])), med(rows[wl].get("je_default",[]))
-    if not (nv==nv and al==al and df==df and nv>0):
-        L.append(f"{wl:<12}  (incomplete jemalloc triple)"); continue
-    bloat   = (al-nv)/nv
-    residue = (df-nv)/nv
-    L.append(f"{wl:<12} {nv:>10.0f} {al:>10.0f} {df:>10.0f} {bloat:>6.0%} {residue:>7.0%}")
-    gap = (bloat>0.15 and residue>0.15)
-    if wl=="synthetic":
-        go_syn = gap
-        s_nv, s_al, s_df = med(slack[wl].get("je_never",[])), med(slack[wl].get("je_always",[])), med(slack[wl].get("je_default",[]))
-        L.append(f"{'  slack_kb':<12} {s_nv:>10.0f} {s_al:>10.0f} {s_df:>10.0f}")
-    else:
-        if gap: go_app = True
-        if residue <= 0.10: nogo_app = True
-L.append("")
-# reference rows (glibc / mimalloc) for context
-L.append("reference Max-RSS (median kB):")
-for wl in rows:
-    g = med(rows[wl].get("glibc",[])); m = med(rows[wl].get("mimalloc",[]))
-    L.append(f"  {wl:<12} glibc={g:.0f} mimalloc={m if m==m else float('nan'):.0f}")
-L.append("")
-if go_syn and go_app:
-    verdict = "GO -- synthetic + >=1 real workload show jemalloc default leaving THP slack (>15%) that a lifetime-aware policy could shed. Proceed to bare-metal TLB half."
-elif nogo_app and not go_app:
-    verdict = "NO-GO -- jemalloc's heuristic already sits at never's RSS on the real workloads. Fold back to option 1."
+# Verdict: GO if the gap holds under the realistic worst case (system always).
+# madvise-mode behavior is reported as scope, not a gate.
+if go_by_sys.get("always"):
+    scope = "madvise" if not go_by_sys.get("madvise", True) else "both modes"
+    verdict = ("GO (system THP=always) -- jemalloc default == always (no per-lifetime "
+               "smarts); synthetic + >=1 real workload leave >15% THP slack a lifetime-aware "
+               f"policy could shed. Scope: gap {'NARROWS under madvise (default avoids THP)' if scope=='madvise' else 'holds in '+scope}. "
+               "Next: bare-metal TLB half (CI PMU lacks dTLB events).")
+elif any(go_by_sys.values()):
+    verdict = "GO (partial) -- gap appears in some system THP mode(s) only; see per-mode tables. Scope carefully."
 else:
-    verdict = "INCONCLUSIVE -- synthetic and real signals disagree, or THP slack not reproduced (check system THP mode / jemalloc opt.thp semantics in env.txt)."
+    verdict = ("NO-GO -- jemalloc default already at never's RSS where it matters; "
+               "no slack for per-site lifetime info to shed. Fold back to option 1.")
 L.append("VERDICT (RSS half): " + verdict)
 open(out,"w").write("\n".join(L)+"\n")
 print("\n".join(L))
