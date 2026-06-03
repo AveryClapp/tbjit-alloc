@@ -71,6 +71,20 @@ void decommit_segment(SegmentHeader* seg) {
     seg->decommitted = true;
 }
 
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+// Whether to hint transparent hugepages for new segments (TBJIT_THP, read once
+// lazily). Default on (the 2 MiB rationale). "never" disables it, which lets us
+// isolate whether the segment RSS slack comes from THP faulting whole hugepages
+// for partially-filled segments vs. raw segment size.
+bool thp_hint() {
+    static bool on = []() {
+        const char* e = std::getenv("TBJIT_THP");
+        return !(e && std::strcmp(e, "never") == 0);
+    }();
+    return on;
+}
+#endif
+
 void* aligned_mmap_2mib() {
     // Over-allocate by SEGMENT_SIZE, then trim leading and trailing slack so
     // the surviving range is 2 MiB-aligned. munmap on partial ranges is safe
@@ -98,9 +112,10 @@ void* aligned_mmap_2mib() {
     // and the `hold` bench gap (mimalloc 6.9 ns vs ours ~87 ns/op tracked
     // closely with TLB-miss cost) is what this targets. madvise is
     // best-effort: if THP is disabled at the kernel level, the segment
-    // stays backed by 4 KiB pages, no harm done.
-    (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
-                   MADV_HUGEPAGE);
+    // stays backed by 4 KiB pages, no harm done. Disabled by TBJIT_THP=never.
+    if (thp_hint())
+        (void) madvise(reinterpret_cast<void*>(aligned_lo), SEGMENT_SIZE,
+                       MADV_HUGEPAGE);
 #endif
 
     return reinterpret_cast<void*>(aligned_lo);

@@ -1,0 +1,77 @@
+name: THP isolation
+
+# Isolates whether the segment RSS slack comes from transparent hugepages (THP
+# faulting whole 2 MiB regions for partially-filled segments) or from raw segment
+# size. At fixed 2 MiB, compares TBJIT_THP on vs never on RSS (replay traces) and
+# latency (hold/monomorphic). See bench/thp_isolation.sh. CI only (JIT is
+# x86-64); manual dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      passes:
+        description: 'Timed passes per backend'
+        required: false
+        default: '15'
+        type: string
+
+jobs:
+  thp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential util-linux \
+            openssl perl g++
+
+      - name: Configure + build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)"
+
+      - name: THP isolation
+        env:
+          BOUND_BENCH_PASSES: ${{ inputs.passes }}
+        run: |
+          mkdir -p bench-out
+          bash bench/thp_isolation.sh build bench-out/thp \
+            | tee bench-out/thp-run.log
+
+      - name: Render results into job summary
+        if: always()
+        run: |
+          {
+            echo "## THP isolation (fixed 2 MiB segments)"
+            echo
+            if [ -s bench-out/thp/thp_rss.tsv ]; then
+              echo "### RSS (kB)"
+              echo '| thp | backend | workload | p50_ns | peak_rss_kb | jit_served |'
+              echo '|---|---|---|--:|--:|--:|'
+              tail -n +2 bench-out/thp/thp_rss.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n",$1,$2,$3,$4,$5,$6}'
+            fi
+            echo
+            if [ -s bench-out/thp/thp_lat.tsv ]; then
+              echo "### Latency (ns/op)"
+              echo '| thp | bench | phase | ns/op |'
+              echo '|---|---|---|--:|'
+              tail -n +2 bench-out/thp/thp_lat.tsv \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s |\n",$1,$2,$3,$4}'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thp-${{ github.sha }}
+          path: |
+            bench-out/thp/
+            bench-out/thp-run.log
+          retention-days: 90
