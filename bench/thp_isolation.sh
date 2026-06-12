@@ -49,7 +49,7 @@ for name in "${!TRACE_OF[@]}"; do
   printf "NA\tglibc\t%s\t%s\t%s\t1.000\n" "$name" "$p50" "$rss" >> "$RSS"
   for thp in always never auto; do
     lg="$LOG/rss_${name}_${thp}.log"
-    pre=(); [[ "$thp" != always ]] && pre=(TBJIT_THP="$thp")
+    pre=(TBJIT_THP="$thp")  # explicit: the library default is now "auto"
     row="$(env "${pre[@]}" "$BENCH" "${TRACE_OF[$name]}" --backend bound \
            --label "$name" --passes "$PASSES" --profile 2>"$lg" | tail -1)" || {
       echo "[fail rss $name $thp] see $lg" >&2; continue; }
@@ -78,7 +78,7 @@ for rep in $(seq 1 "$REPS"); do
     [[ -x "$bin" ]] || continue
     "${SETARCH[@]}" "$bin" | emit_lat glibc "$b" "$rep"
     for thp in always never auto; do
-      pre=(LD_PRELOAD="$LIB"); [[ "$thp" != always ]] && pre+=(TBJIT_THP="$thp")
+      pre=(LD_PRELOAD="$LIB" TBJIT_THP="$thp")
       "${SETARCH[@]}" env "${pre[@]}" "$bin" | emit_lat "$thp" "$b" "$rep"
     done
   done

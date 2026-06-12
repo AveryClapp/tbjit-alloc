@@ -52,7 +52,7 @@ for name in "${CORPUS[@]}"; do
   CMD_STR="$(workload_cmd)"
   echo "[run $WORKLOAD_NAME]"
   run_cfg glibc  ""
-  run_cfg always "LD_PRELOAD=$LIB "
+  run_cfg always "LD_PRELOAD=$LIB TBJIT_THP=always "
   run_cfg auto   "LD_PRELOAD=$LIB TBJIT_THP=auto "
   declare -F workload_teardown >/dev/null && workload_teardown
 done

@@ -71,18 +71,22 @@ void decommit_segment(SegmentHeader* seg) {
     seg->decommitted = true;
 }
 
-// THP policy for new segments (TBJIT_THP, read once lazily). Default "always"
-// (the 2 MiB rationale); "never" actively opts out; "auto" defers per-site to
-// the registered predicate (Hold sites keep THP, churn sites drop it).
+// THP policy for new segments (TBJIT_THP, read once lazily). Default "auto":
+// per-site deferral to the registered predicate (Hold sites keep THP for the
+// TLB benefit; churn sites drop it so partially-filled segments don't fault
+// whole 2 MiB hugepages). Validated end-to-end 2026-06-03: RSS strictly
+// better-or-neutral vs "always" on the corpus, no wall-time regression. With
+// no predicate registered (trace-only, pre-init) auto behaves as "always".
+// "always"/"never" force the old unconditional modes.
 enum class ThpMode { Always, Never, Auto };
 ThpMode thp_mode() {
     static ThpMode m = []() {
         const char* e = std::getenv("TBJIT_THP");
         if (e) {
-            if (std::strcmp(e, "never") == 0) return ThpMode::Never;
-            if (std::strcmp(e, "auto")  == 0) return ThpMode::Auto;
+            if (std::strcmp(e, "never")  == 0) return ThpMode::Never;
+            if (std::strcmp(e, "always") == 0) return ThpMode::Always;
         }
-        return ThpMode::Always;
+        return ThpMode::Auto;
     }();
     return m;
 }
