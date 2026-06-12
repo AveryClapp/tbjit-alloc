@@ -2,13 +2,13 @@
 """Cost-of-analysis overhead report for the tbjit allocator.
 
 Phase 3a.6: honest accounting of what the JIT picker costs. Reviewers will
-ask "what's the overhead?" and "isn't the g_summaries array 256 MiB?". This
+ask "what's the overhead?" and "isn't the g_summaries array huge?". This
 pulls the answers out of one real-workload run:
 
   - Memory: resident RSS delta (tbjit vs glibc) per workload, from
     manifest.tsv max_rss_kb. Plus the structural costs: compiled code pages
     (compiled-count x 4 KiB), live segment headers (64 B each), and the
-    g_summaries array (mmap'd lazily, so the 256 MiB virtual size is *not*
+    g_summaries array (mmap'd lazily, so its virtual size is *not*
     resident — only touched call-site slots are).
   - Time: wall delta (tbjit vs glibc) per workload, and the per-call
     trampoline cost from bench/bench_micro_jit_direct.cpp (pass --ns-per-call
@@ -33,7 +33,8 @@ from analyze_dumps import load_dumps  # noqa: E402
 CODE_PAGE_BYTES = 4096           # src/codegen/codegen.cpp CODE_PAGE_SIZE
 SEGMENT_HEADER_BYTES = 64        # src/seg/segment.h SegmentHeader (one line)
 MAX_CALL_SITES = 4096            # src/analysis/analysis.cpp
-SUMMARY_VIRT_MIB = 256           # sizeof(CallSiteSummary)*MAX_CALL_SITES, mmap'd
+SUMMARY_VIRT_MIB = 9.4           # sizeof(CallSiteSummary)=2408 B * MAX_CALL_SITES,
+                                 # mmap'd (was 256 MiB before the sparse histogram)
 
 # Default trampoline cost (ns/call) from bench/bench_micro_jit_direct.cpp.
 # This is the JIT fast-path inner loop; refresh with --ns-per-call after
@@ -143,7 +144,7 @@ def render(rows, ns_per_call, md=True):
     out.append(f"- g_summaries: {SUMMARY_VIRT_MIB} MiB *virtual* "
                f"(sizeof(CallSiteSummary) x {MAX_CALL_SITES}), mmap'd lazily — only "
                "touched call-site slots are resident, so the RSS Δ above is the "
-               "honest resident cost, not 256 MiB.")
+               "honest resident cost, not the virtual size.")
     out.append(f"- Median resident RSS overhead vs glibc: "
                f"{_fmt(median_rss,'%',1)} across {len(rss_deltas)} workloads.")
 

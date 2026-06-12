@@ -318,8 +318,9 @@ bool thp_wants_huge(CallSiteID site) {
 void init_state() {
     seg::set_thp_predicate(thp_wants_huge);
     if (!g_summaries) {
-        // The summary array is ~256 MiB for MAX_CALL_SITES=4096 — too large
-        // for the 4 MiB internal bump arena. Use mmap directly.
+        // The summary array is ~9.4 MiB for MAX_CALL_SITES=4096 (2408 B per
+        // entry since the sparse histogram) — too large for the 4 MiB internal
+        // bump arena. Use mmap directly.
         const size_t sz = sizeof(CallSiteSummary) * MAX_CALL_SITES;
         void* mem = mmap(nullptr, sz, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
